@@ -1,6 +1,7 @@
 from pathlib import Path
-import math
 import re
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -14,14 +15,28 @@ LMU_EXCEL_PATH = Path("./lmu.xlsx")
 
 IMAGE_ROOT = Path("/home/ubuntu/final_dataset")
 
-# Output files
+# ECG interval source files.
+TUM_ECG_INTERVAL_PATH = Path(
+    "/home/ubuntu/TAVI_new/dataset/dataset_new_binary.xlsx"
+)
+
+LMU_ECG_INTERVAL_PATH = Path(
+    "/home/ubuntu/TAVI_final/dataset/ecg/ecg_intervals_lmu/ecg.xlsx"
+)
+
+# Output files.
 ENTIRE_OUTPUT_PATH = Path("./entire.xlsx")
 TUM_CLEANED_OUTPUT_PATH = Path("./tum_cleaned.xlsx")
 LMU_CLEANED_OUTPUT_PATH = Path("./lmu_cleaned.xlsx")
 
 SPLIT_OUTPUT_ROOT = Path("./dataset_splits")
 
-# Change this manually if automatic detection selects the wrong column.
+# Distribution plot output paths.
+PQ_DISTRIBUTION_PLOT_PATH = Path("./pq_distribution.png")
+QRS_DISTRIBUTION_PLOT_PATH = Path("./qrs_distribution.png")
+
+# Change manually if automatic ID-column detection is incorrect.
+#
 # Example:
 # ID_COLUMN = "ID"
 ID_COLUMN = None
@@ -29,11 +44,24 @@ ID_COLUMN = None
 LABEL_COLUMN = "LABEL"
 SEX_COLUMN = "SEX"
 
-# Around 20% of each LABEL × SEX group is placed in the final test set.
+QRS_COLUMN = "QRSADM"
+PQ_COLUMN = "PQADM"
+
+# Around 20% of each LABEL × SEX group goes into the fixed test set.
 TEST_FRACTION = 0.20
 
 N_FOLDS = 5
 RANDOM_SEED = 42
+
+# Histogram configuration.
+HISTOGRAM_BINS = 50
+PLOT_DPI = 300
+
+# Large presentation-friendly fonts.
+FONT_SIZE = 20
+TICK_FONT_SIZE = 18
+LEGEND_FONT_SIZE = 18
+LINE_WIDTH = 3.0
 
 # Image file extensions that will be considered.
 IMAGE_EXTENSIONS = {
@@ -46,7 +74,7 @@ IMAGE_EXTENSIONS = {
     ".webp",
 }
 
-# Candidate names used to automatically find the patient/image ID column.
+# Candidate names used to automatically find an ID column.
 ID_COLUMN_CANDIDATES = [
     "ID",
     "PATIENT_ID",
@@ -80,7 +108,7 @@ def normalize_identifier(value):
         "00123"   -> "00123"
         "123.png" -> "123"
 
-    The function does not remove leading zeros from string IDs.
+    Leading zeros in string IDs are preserved.
     """
     if pd.isna(value):
         return None
@@ -90,12 +118,13 @@ def normalize_identifier(value):
     if not value_str:
         return None
 
-    # Remove an image extension if an Excel value contains one.
+    # Remove image extension if the Excel ID includes one.
     suffix = Path(value_str).suffix.lower()
+
     if suffix in IMAGE_EXTENSIONS:
         value_str = Path(value_str).stem.strip()
 
-    # Excel often converts integer IDs to floating-point values such as 123.0.
+    # Excel often represents integer IDs as values such as 123.0.
     if re.fullmatch(r"-?\d+\.0+", value_str):
         value_str = value_str.split(".")[0]
 
@@ -104,10 +133,7 @@ def normalize_identifier(value):
 
 def find_id_column(df, requested_column=None):
     """
-    Find the ID column.
-
-    If ID_COLUMN is explicitly configured, it is used.
-    Otherwise, common ID column names are searched.
+    Find the ID column in a dataframe.
     """
     if requested_column is not None:
         if requested_column not in df.columns:
@@ -115,14 +141,15 @@ def find_id_column(df, requested_column=None):
                 f"Configured ID column '{requested_column}' was not found.\n"
                 f"Available columns:\n{list(df.columns)}"
             )
+
         return requested_column
 
-    # First try exact candidate matches.
+    # Exact candidate matches.
     for candidate in ID_COLUMN_CANDIDATES:
         if candidate in df.columns:
             return candidate
 
-    # Then try case-insensitive candidate matches.
+    # Case-insensitive candidate matches.
     lower_to_original = {
         str(column).strip().lower(): column
         for column in df.columns
@@ -130,6 +157,7 @@ def find_id_column(df, requested_column=None):
 
     for candidate in ID_COLUMN_CANDIDATES:
         candidate_lower = candidate.lower()
+
         if candidate_lower in lower_to_original:
             return lower_to_original[candidate_lower]
 
@@ -142,12 +170,16 @@ def find_id_column(df, requested_column=None):
 
 def validate_required_columns(df, dataset_name):
     """
-    Check that LABEL and SEX are available and contain no missing values.
+    Check that LABEL and SEX exist and have no missing values.
     """
-    required_columns = [LABEL_COLUMN, SEX_COLUMN]
+    required_columns = [
+        LABEL_COLUMN,
+        SEX_COLUMN,
+    ]
 
     missing_columns = [
-        column for column in required_columns
+        column
+        for column in required_columns
         if column not in df.columns
     ]
 
@@ -159,7 +191,9 @@ def validate_required_columns(df, dataset_name):
         )
 
     for column in required_columns:
-        missing_count = int(df[column].isna().sum())
+        missing_count = int(
+            df[column].isna().sum()
+        )
 
         if missing_count > 0:
             raise ValueError(
@@ -172,10 +206,7 @@ def validate_required_columns(df, dataset_name):
 
 def collect_image_identifiers(image_root):
     """
-    Recursively scan the image directory and collect all image filename stems.
-
-    Example:
-        /home/ubuntu/final_dataset/123.png -> "123"
+    Recursively scan the image directory and collect image filename stems.
     """
     if not image_root.exists():
         raise FileNotFoundError(
@@ -192,7 +223,9 @@ def collect_image_identifiers(image_root):
         if path.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
 
-        normalized_id = normalize_identifier(path.stem)
+        normalized_id = normalize_identifier(
+            path.stem
+        )
 
         if normalized_id is not None:
             image_ids.add(normalized_id)
@@ -218,21 +251,41 @@ def clean_dataframe_using_images(
     dataset_name,
 ):
     """
-    Keep only rows whose normalized ID exists among the image filenames.
+    Keep only rows whose normalized ID exists among image filenames.
     """
     cleaned_df = df.copy()
 
-    normalized_ids = cleaned_df[id_column].map(normalize_identifier)
+    normalized_ids = cleaned_df[
+        id_column
+    ].map(normalize_identifier)
 
     missing_id_mask = normalized_ids.isna()
-    missing_image_mask = ~normalized_ids.isin(image_ids)
-    remove_mask = missing_id_mask | missing_image_mask
+    missing_image_mask = ~normalized_ids.isin(
+        image_ids
+    )
 
-    removed_df = cleaned_df.loc[remove_mask].copy()
-    cleaned_df = cleaned_df.loc[~remove_mask].copy()
+    remove_mask = (
+        missing_id_mask
+        | missing_image_mask
+    )
 
-    cleaned_df.reset_index(drop=True, inplace=True)
-    removed_df.reset_index(drop=True, inplace=True)
+    removed_df = cleaned_df.loc[
+        remove_mask
+    ].copy()
+
+    cleaned_df = cleaned_df.loc[
+        ~remove_mask
+    ].copy()
+
+    cleaned_df.reset_index(
+        drop=True,
+        inplace=True,
+    )
+
+    removed_df.reset_index(
+        drop=True,
+        inplace=True,
+    )
 
     print()
     print(f"{dataset_name} image matching")
@@ -261,32 +314,469 @@ def clean_dataframe_using_images(
     return cleaned_df, removed_df
 
 
+# ============================================================
+# ECG INTERVAL MATCHING
+# ============================================================
+
+def load_interval_table(
+    interval_path,
+    dataset_name,
+):
+    """
+    Load an ECG interval file and retain:
+        ID
+        QRSADM
+        PQADM
+
+    Duplicate interval IDs are rejected because they would produce
+    ambiguous matches.
+    """
+    if not interval_path.exists():
+        raise FileNotFoundError(
+            f"{dataset_name} ECG interval file does not exist: "
+            f"{interval_path}"
+        )
+
+    interval_df = pd.read_excel(
+        interval_path
+    )
+
+    interval_id_column = find_id_column(
+        interval_df,
+        ID_COLUMN,
+    )
+
+    missing_columns = [
+        column
+        for column in [
+            QRS_COLUMN,
+            PQ_COLUMN,
+        ]
+        if column not in interval_df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            f"{dataset_name} ECG interval file is missing columns: "
+            f"{missing_columns}\n"
+            f"Available columns:\n{list(interval_df.columns)}"
+        )
+
+    interval_df = interval_df[
+        [
+            interval_id_column,
+            QRS_COLUMN,
+            PQ_COLUMN,
+        ]
+    ].copy()
+
+    interval_df["_NORMALIZED_ID"] = (
+        interval_df[
+            interval_id_column
+        ].map(normalize_identifier)
+    )
+
+    # Remove interval rows without a usable ID.
+    interval_df = interval_df.loc[
+        interval_df["_NORMALIZED_ID"].notna()
+    ].copy()
+
+    duplicate_mask = interval_df[
+        "_NORMALIZED_ID"
+    ].duplicated(
+        keep=False
+    )
+
+    if duplicate_mask.any():
+        duplicate_ids = (
+            interval_df.loc[
+                duplicate_mask,
+                "_NORMALIZED_ID",
+            ]
+            .drop_duplicates()
+            .head(20)
+            .tolist()
+        )
+
+        raise ValueError(
+            f"{dataset_name} ECG interval file contains duplicate IDs.\n"
+            f"First duplicate IDs: {duplicate_ids}"
+        )
+
+    interval_df[QRS_COLUMN] = pd.to_numeric(
+        interval_df[QRS_COLUMN],
+        errors="coerce",
+    )
+
+    interval_df[PQ_COLUMN] = pd.to_numeric(
+        interval_df[PQ_COLUMN],
+        errors="coerce",
+    )
+
+    interval_df = interval_df[
+        [
+            "_NORMALIZED_ID",
+            QRS_COLUMN,
+            PQ_COLUMN,
+        ]
+    ].copy()
+
+    print()
+    print(f"{dataset_name} ECG interval source")
+    print("-" * 60)
+    print(f"Source file:               {interval_path}")
+    print(f"Rows with valid ID:        {len(interval_df)}")
+    print(
+        f"Rows with QRSADM:          "
+        f"{int(interval_df[QRS_COLUMN].notna().sum())}"
+    )
+    print(
+        f"Rows with PQADM:           "
+        f"{int(interval_df[PQ_COLUMN].notna().sum())}"
+    )
+
+    return interval_df
+
+
+def add_ecg_intervals(
+    dataset_df,
+    dataset_id_column,
+    interval_df,
+    dataset_name,
+):
+    """
+    Add QRSADM and PQADM to a dataset by matching normalized IDs.
+
+    This performs a left join, so dataset rows are not removed when an
+    interval is unavailable.
+    """
+    output_df = dataset_df.copy()
+
+    # Remove existing versions to avoid merge suffixes.
+    columns_to_drop = [
+        column
+        for column in [
+            QRS_COLUMN,
+            PQ_COLUMN,
+        ]
+        if column in output_df.columns
+    ]
+
+    if columns_to_drop:
+        print(
+            f"{dataset_name}: replacing existing columns "
+            f"{columns_to_drop}"
+        )
+
+        output_df = output_df.drop(
+            columns=columns_to_drop
+        )
+
+    output_df["_NORMALIZED_ID"] = (
+        output_df[
+            dataset_id_column
+        ].map(normalize_identifier)
+    )
+
+    output_df = output_df.merge(
+        interval_df,
+        how="left",
+        on="_NORMALIZED_ID",
+        validate="many_to_one",
+    )
+
+    matched_qrs = int(
+        output_df[
+            QRS_COLUMN
+        ].notna().sum()
+    )
+
+    matched_pq = int(
+        output_df[
+            PQ_COLUMN
+        ].notna().sum()
+    )
+
+    both_matched = int(
+        (
+            output_df[QRS_COLUMN].notna()
+            & output_df[PQ_COLUMN].notna()
+        ).sum()
+    )
+
+    neither_matched = int(
+        (
+            output_df[QRS_COLUMN].isna()
+            & output_df[PQ_COLUMN].isna()
+        ).sum()
+    )
+
+    print()
+    print(f"{dataset_name} ECG interval matching")
+    print("-" * 60)
+    print(f"Dataset rows:              {len(output_df)}")
+    print(f"QRSADM matched:            {matched_qrs}")
+    print(f"PQADM matched:             {matched_pq}")
+    print(f"Both values matched:       {both_matched}")
+    print(f"No interval values:        {neither_matched}")
+
+    output_df = output_df.drop(
+        columns="_NORMALIZED_ID"
+    )
+
+    # Store as nullable integers to preserve empty cells in Excel.
+    output_df[QRS_COLUMN] = (
+        pd.to_numeric(
+            output_df[QRS_COLUMN],
+            errors="coerce",
+        )
+        .round()
+        .astype("Int64")
+    )
+
+    output_df[PQ_COLUMN] = (
+        pd.to_numeric(
+            output_df[PQ_COLUMN],
+            errors="coerce",
+        )
+        .round()
+        .astype("Int64")
+    )
+
+    return output_df
+
+
+# ============================================================
+# DISTRIBUTION PLOTS
+# ============================================================
+
+def prepare_numeric_values(
+    df,
+    column,
+):
+    """
+    Return finite numerical values from a dataframe column.
+    """
+    values = pd.to_numeric(
+        df[column],
+        errors="coerce",
+    ).dropna().to_numpy(
+        dtype=float
+    )
+
+    return values[
+        np.isfinite(values)
+    ]
+
+
+def determine_common_histogram_bins(
+    tum_values,
+    lmu_values,
+    number_of_bins,
+):
+    """
+    Create common histogram bins for TUM and LMU.
+    """
+    combined_values = np.concatenate(
+        [
+            tum_values,
+            lmu_values,
+        ]
+    )
+
+    if len(combined_values) == 0:
+        raise ValueError(
+            "No valid values were available for plotting."
+        )
+
+    minimum = float(
+        np.min(combined_values)
+    )
+
+    maximum = float(
+        np.max(combined_values)
+    )
+
+    if minimum == maximum:
+        minimum -= 0.5
+        maximum += 0.5
+
+    return np.linspace(
+        minimum,
+        maximum,
+        number_of_bins + 1,
+    )
+
+
+def plot_domain_distribution(
+    tum_df,
+    lmu_df,
+    column,
+    x_label,
+    output_path,
+):
+    """
+    Plot TUM and LMU distributions as two grayscale step histograms.
+
+    Density normalization is used because TUM and LMU contain different
+    numbers of samples.
+    """
+    tum_values = prepare_numeric_values(
+        tum_df,
+        column,
+    )
+
+    lmu_values = prepare_numeric_values(
+        lmu_df,
+        column,
+    )
+
+    if len(tum_values) == 0:
+        print(
+            f"WARNING: no valid TUM values for {column}. "
+            f"Plot was not created."
+        )
+        return
+
+    if len(lmu_values) == 0:
+        print(
+            f"WARNING: no valid LMU values for {column}. "
+            f"Plot was not created."
+        )
+        return
+
+    bins = determine_common_histogram_bins(
+        tum_values=tum_values,
+        lmu_values=lmu_values,
+        number_of_bins=HISTOGRAM_BINS,
+    )
+
+    plt.rcParams.update(
+        {
+            "font.size": FONT_SIZE,
+            "font.family": "sans-serif",
+            "axes.labelsize": FONT_SIZE,
+            "xtick.labelsize": TICK_FONT_SIZE,
+            "ytick.labelsize": TICK_FONT_SIZE,
+            "legend.fontsize": LEGEND_FONT_SIZE,
+        }
+    )
+
+    figure, axis = plt.subplots(
+        figsize=(10, 7)
+    )
+
+    axis.hist(
+        tum_values,
+        bins=bins,
+        density=True,
+        histtype="step",
+        linewidth=LINE_WIDTH,
+        color="black",
+        label=f"TUM (n={len(tum_values)})",
+    )
+
+    axis.hist(
+        lmu_values,
+        bins=bins,
+        density=True,
+        histtype="step",
+        linewidth=LINE_WIDTH,
+        color="0.55",
+        linestyle="--",
+        label=f"LMU (n={len(lmu_values)})",
+    )
+
+    axis.set_xlabel(
+        x_label
+    )
+
+    axis.set_ylabel(
+        "Density"
+    )
+
+    # No title, as requested.
+    axis.legend(
+        frameon=False
+    )
+
+    axis.spines["top"].set_visible(
+        False
+    )
+
+    axis.spines["right"].set_visible(
+        False
+    )
+
+    axis.grid(
+        axis="y",
+        linestyle=":",
+        linewidth=1.0,
+        color="0.80",
+    )
+
+    figure.tight_layout()
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    figure.savefig(
+        output_path,
+        dpi=PLOT_DPI,
+        bbox_inches="tight",
+    )
+
+    plt.close(
+        figure
+    )
+
+    print(
+        f"{column} distribution plot saved to: "
+        f"{output_path}"
+    )
+
+
+# ============================================================
+# SPLIT CONSTRUCTION
+# ============================================================
+
 def make_stratification_key(df):
     """
     Construct a LABEL × SEX stratification key.
-
-    Examples:
-        label 0, sex F -> "0__F"
-        label 1, sex M -> "1__M"
     """
-    label_values = df[LABEL_COLUMN].astype(str).str.strip()
-    sex_values = df[SEX_COLUMN].astype(str).str.strip()
+    label_values = (
+        df[LABEL_COLUMN]
+        .astype(str)
+        .str.strip()
+    )
 
-    return label_values + "__" + sex_values
+    sex_values = (
+        df[SEX_COLUMN]
+        .astype(str)
+        .str.strip()
+    )
+
+    return (
+        label_values
+        + "__"
+        + sex_values
+    )
 
 
-def allocate_test_count(group_size, test_fraction, n_folds):
+def allocate_test_count(
+    group_size,
+    test_fraction,
+    n_folds,
+):
     """
     Choose the number of test samples for one LABEL × SEX group.
 
-    The allocation tries to:
-      1. approximate TEST_FRACTION;
-      2. leave at least one sample per fold;
-      3. make the remaining development count divisible by five
-         when reasonably possible.
-
-    Making the remaining count divisible by five allows every fold to
-    receive exactly the same count from that stratum.
+    The allocation:
+      1. approximates TEST_FRACTION;
+      2. leaves at least one sample per development fold;
+      3. prefers a remaining development count divisible by five.
     """
     if group_size < n_folds + 1:
         raise ValueError(
@@ -295,19 +785,32 @@ def allocate_test_count(group_size, test_fraction, n_folds):
             "non-empty test split and five development folds."
         )
 
-    target_test_count = group_size * test_fraction
+    target_test_count = (
+        group_size
+        * test_fraction
+    )
 
     possible_counts = []
 
-    # At least 1 test sample, and at least n_folds development samples.
-    for test_count in range(1, group_size - n_folds + 1):
-        remaining_count = group_size - test_count
+    for test_count in range(
+        1,
+        group_size - n_folds + 1,
+    ):
+        remaining_count = (
+            group_size
+            - test_count
+        )
 
-        # Prefer allocations where each fold receives the exact same
-        # number from this stratum.
-        divisible = remaining_count % n_folds == 0
+        divisible = (
+            remaining_count
+            % n_folds
+            == 0
+        )
 
-        distance_from_target = abs(test_count - target_test_count)
+        distance_from_target = abs(
+            test_count
+            - target_test_count
+        )
 
         possible_counts.append(
             (
@@ -338,16 +841,25 @@ def create_fixed_test_and_folds(
 
     Splitting is performed independently inside every LABEL × SEX group.
 
-    The test and five folds are mutually exclusive.
-    Their union equals the complete cleaned dataset.
+    Validation is performed using original row indices, so nullable values,
+    duplicate row contents, and pandas dtype differences do not cause
+    false validation failures.
     """
     df = df.copy().reset_index(drop=True)
-    df["_STRATIFICATION_KEY"] = make_stratification_key(df)
 
-    rng = np.random.default_rng(random_seed)
+    df["_STRATIFICATION_KEY"] = make_stratification_key(
+        df
+    )
+
+    rng = np.random.default_rng(
+        random_seed
+    )
 
     test_indices = []
-    fold_indices = [[] for _ in range(N_FOLDS)]
+    fold_indices = [
+        []
+        for _ in range(N_FOLDS)
+    ]
 
     grouped = df.groupby(
         "_STRATIFICATION_KEY",
@@ -356,14 +868,25 @@ def create_fixed_test_and_folds(
     )
 
     print()
-    print(f"Constructing splits for {dataset_name}")
+    print(
+        f"Constructing splits for {dataset_name}"
+    )
     print("-" * 60)
 
     for stratum_name, stratum_df in grouped:
-        indices = stratum_df.index.to_numpy().copy()
-        rng.shuffle(indices)
+        indices = (
+            stratum_df.index
+            .to_numpy(dtype=np.int64)
+            .copy()
+        )
 
-        group_size = len(indices)
+        rng.shuffle(
+            indices
+        )
+
+        group_size = len(
+            indices
+        )
 
         test_count = allocate_test_count(
             group_size=group_size,
@@ -371,22 +894,35 @@ def create_fixed_test_and_folds(
             n_folds=N_FOLDS,
         )
 
-        stratum_test_indices = indices[:test_count]
-        stratum_development_indices = indices[test_count:]
+        stratum_test_indices = (
+            indices[:test_count]
+        )
 
-        test_indices.extend(stratum_test_indices.tolist())
+        stratum_development_indices = (
+            indices[test_count:]
+        )
 
-        # Shuffle development samples one more time before distributing.
-        rng.shuffle(stratum_development_indices)
+        test_indices.extend(
+            stratum_test_indices.tolist()
+        )
 
-        # array_split guarantees that fold sizes differ by at most one.
+        rng.shuffle(
+            stratum_development_indices
+        )
+
         stratum_fold_parts = np.array_split(
             stratum_development_indices,
             N_FOLDS,
         )
 
-        for fold_number, fold_part in enumerate(stratum_fold_parts):
-            fold_indices[fold_number].extend(fold_part.tolist())
+        for fold_number, fold_part in enumerate(
+            stratum_fold_parts
+        ):
+            fold_indices[
+                fold_number
+            ].extend(
+                fold_part.tolist()
+            )
 
         fold_sizes = [
             len(fold_part)
@@ -400,57 +936,198 @@ def create_fixed_test_and_folds(
             f"folds={fold_sizes}"
         )
 
-    # Shuffle the order of rows inside every output split.
-    test_indices = np.asarray(test_indices)
-    rng.shuffle(test_indices)
+    # Convert all index collections to NumPy arrays.
+    test_indices = np.asarray(
+        test_indices,
+        dtype=np.int64,
+    )
 
-    shuffled_fold_indices = []
+    fold_indices = [
+        np.asarray(
+            indices,
+            dtype=np.int64,
+        )
+        for indices in fold_indices
+    ]
+
+    # Shuffle final row order inside each output split.
+    rng.shuffle(
+        test_indices
+    )
 
     for indices in fold_indices:
-        indices = np.asarray(indices)
-        rng.shuffle(indices)
-        shuffled_fold_indices.append(indices)
+        rng.shuffle(
+            indices
+        )
 
+    # --------------------------------------------------------
+    # Validate the partition using row indices
+    # --------------------------------------------------------
+    validate_partition_indices(
+        original_row_count=len(df),
+        test_indices=test_indices,
+        fold_indices=fold_indices,
+        dataset_name=dataset_name,
+    )
+
+    # --------------------------------------------------------
+    # Construct output dataframes
+    # --------------------------------------------------------
     test_df = (
-        df.loc[test_indices]
-        .drop(columns="_STRATIFICATION_KEY")
+        df.iloc[test_indices]
+        .drop(
+            columns="_STRATIFICATION_KEY"
+        )
         .reset_index(drop=True)
     )
 
     folds = []
 
-    for indices in shuffled_fold_indices:
+    for indices in fold_indices:
         fold_df = (
-            df.loc[indices]
-            .drop(columns="_STRATIFICATION_KEY")
+            df.iloc[indices]
+            .drop(
+                columns="_STRATIFICATION_KEY"
+            )
             .reset_index(drop=True)
         )
-        folds.append(fold_df)
 
-    validate_partition(
-        original_df=df.drop(columns="_STRATIFICATION_KEY"),
-        test_df=test_df,
-        folds=folds,
-        dataset_name=dataset_name,
-    )
+        folds.append(
+            fold_df
+        )
 
     return test_df, folds
+
+def validate_partition_indices(
+    original_row_count,
+    test_indices,
+    fold_indices,
+    dataset_name,
+):
+    """
+    Validate that test and fold index arrays form an exact partition of
+    the original dataframe.
+
+    Checks:
+      - total number of selected rows is correct;
+      - no row index appears more than once;
+      - no original row is missing;
+      - no invalid row index is present.
+    """
+    all_index_arrays = [
+        np.asarray(
+            test_indices,
+            dtype=np.int64,
+        ),
+        *[
+            np.asarray(
+                indices,
+                dtype=np.int64,
+            )
+            for indices in fold_indices
+        ],
+    ]
+
+    all_indices = np.concatenate(
+        all_index_arrays
+    )
+
+    # Total count check.
+    if len(all_indices) != original_row_count:
+        raise AssertionError(
+            f"{dataset_name}: partition contains "
+            f"{len(all_indices)} rows, but the original dataset "
+            f"contains {original_row_count} rows."
+        )
+
+    # Bounds check.
+    invalid_indices = all_indices[
+        (all_indices < 0)
+        | (all_indices >= original_row_count)
+    ]
+
+    if len(invalid_indices) > 0:
+        raise AssertionError(
+            f"{dataset_name}: invalid row indices were found: "
+            f"{invalid_indices[:20].tolist()}"
+        )
+
+    unique_indices, occurrence_counts = np.unique(
+        all_indices,
+        return_counts=True,
+    )
+
+    duplicated_indices = unique_indices[
+        occurrence_counts > 1
+    ]
+
+    if len(duplicated_indices) > 0:
+        raise AssertionError(
+            f"{dataset_name}: {len(duplicated_indices)} rows occur "
+            "in more than one split.\n"
+            f"First duplicated row indices: "
+            f"{duplicated_indices[:20].tolist()}"
+        )
+
+    expected_indices = np.arange(
+        original_row_count,
+        dtype=np.int64,
+    )
+
+    missing_indices = np.setdiff1d(
+        expected_indices,
+        unique_indices,
+    )
+
+    if len(missing_indices) > 0:
+        raise AssertionError(
+            f"{dataset_name}: {len(missing_indices)} rows are missing "
+            "from the test/fold partition.\n"
+            f"First missing row indices: "
+            f"{missing_indices[:20].tolist()}"
+        )
+
+    unexpected_indices = np.setdiff1d(
+        unique_indices,
+        expected_indices,
+    )
+
+    if len(unexpected_indices) > 0:
+        raise AssertionError(
+            f"{dataset_name}: unexpected row indices were found.\n"
+            f"First unexpected indices: "
+            f"{unexpected_indices[:20].tolist()}"
+        )
+
+    print(
+        f"{dataset_name}: partition validation passed. "
+        f"All {original_row_count} rows occur exactly once."
+    )
 
 
 def row_identity_set(df):
     """
     Create a row-level identity representation for validation.
-
-    This verifies that no row is lost or duplicated across partitions.
     """
     normalized = df.copy()
 
     for column in normalized.columns:
-        normalized[column] = normalized[column].map(
-            lambda value: "<NA>" if pd.isna(value) else str(value)
+        normalized[column] = (
+            normalized[column].map(
+                lambda value: (
+                    "<NA>"
+                    if pd.isna(value)
+                    else str(value)
+                )
+            )
         )
 
-    return set(map(tuple, normalized.to_numpy()))
+    return set(
+        map(
+            tuple,
+            normalized.to_numpy(),
+        )
+    )
 
 
 def validate_partition(
@@ -460,34 +1137,54 @@ def validate_partition(
     dataset_name,
 ):
     """
-    Validate that:
-      - test and folds do not overlap;
-      - folds do not overlap with each other;
-      - every original row appears exactly once;
-      - total row counts match.
+    Validate that test and folds do not overlap and cover all rows.
     """
-    split_dataframes = [test_df] + folds
-    split_names = ["test"] + [
+    split_dataframes = [
+        test_df
+    ] + folds
+
+    split_names = [
+        "test"
+    ] + [
         f"fold{index}"
-        for index in range(1, N_FOLDS + 1)
+        for index in range(
+            1,
+            N_FOLDS + 1,
+        )
     ]
 
-    total_split_rows = sum(len(split_df) for split_df in split_dataframes)
+    total_split_rows = sum(
+        len(split_df)
+        for split_df in split_dataframes
+    )
 
-    if total_split_rows != len(original_df):
+    if total_split_rows != len(
+        original_df
+    ):
         raise AssertionError(
             f"{dataset_name}: split sizes sum to {total_split_rows}, "
             f"but the original dataset contains {len(original_df)} rows."
         )
 
     identity_sets = [
-        row_identity_set(split_df)
+        row_identity_set(
+            split_df
+        )
         for split_df in split_dataframes
     ]
 
-    for i in range(len(identity_sets)):
-        for j in range(i + 1, len(identity_sets)):
-            overlap = identity_sets[i].intersection(identity_sets[j])
+    for i in range(
+        len(identity_sets)
+    ):
+        for j in range(
+            i + 1,
+            len(identity_sets),
+        ):
+            overlap = identity_sets[
+                i
+            ].intersection(
+                identity_sets[j]
+            )
 
             if overlap:
                 raise AssertionError(
@@ -495,8 +1192,13 @@ def validate_partition(
                     f"{split_names[i]} and {split_names[j]}."
                 )
 
-    union_set = set().union(*identity_sets)
-    original_set = row_identity_set(original_df)
+    union_set = set().union(
+        *identity_sets
+    )
+
+    original_set = row_identity_set(
+        original_df
+    )
 
     if union_set != original_set:
         raise AssertionError(
@@ -511,22 +1213,26 @@ def save_split_collection(
     folds,
 ):
     """
-    Save:
-        test.xlsx
-        fold1.xlsx
-        ...
-        fold5.xlsx
+    Save test.xlsx and fold1.xlsx through fold5.xlsx.
     """
-    output_directory.mkdir(parents=True, exist_ok=True)
+    output_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     test_df.to_excel(
-        output_directory / "test.xlsx",
+        output_directory
+        / "test.xlsx",
         index=False,
     )
 
-    for fold_number, fold_df in enumerate(folds, start=1):
+    for fold_number, fold_df in enumerate(
+        folds,
+        start=1,
+    ):
         fold_df.to_excel(
-            output_directory / f"fold{fold_number}.xlsx",
+            output_directory
+            / f"fold{fold_number}.xlsx",
             index=False,
         )
 
@@ -538,32 +1244,45 @@ def concatenate_matching_splits(
     lmu_folds,
 ):
     """
-    Build merged splits only by concatenating matching TUM and LMU splits.
-
-    Therefore:
-        merged test  = TUM test  + LMU test
-        merged fold1 = TUM fold1 + LMU fold1
-        ...
+    Build merged splits by concatenating corresponding TUM and LMU splits.
     """
     merged_test = pd.concat(
-        [tum_test, lmu_test],
+        [
+            tum_test,
+            lmu_test,
+        ],
         axis=0,
         ignore_index=True,
     )
 
     merged_folds = []
 
-    for tum_fold, lmu_fold in zip(tum_folds, lmu_folds):
+    for tum_fold, lmu_fold in zip(
+        tum_folds,
+        lmu_folds,
+    ):
         merged_fold = pd.concat(
-            [tum_fold, lmu_fold],
+            [
+                tum_fold,
+                lmu_fold,
+            ],
             axis=0,
             ignore_index=True,
         )
 
-        merged_folds.append(merged_fold)
+        merged_folds.append(
+            merged_fold
+        )
 
-    return merged_test, merged_folds
+    return (
+        merged_test,
+        merged_folds,
+    )
 
+
+# ============================================================
+# REPORTING
+# ============================================================
 
 def distribution_table(df):
     """
@@ -571,20 +1290,32 @@ def distribution_table(df):
     """
     table = (
         df.groupby(
-            [LABEL_COLUMN, SEX_COLUMN],
+            [
+                LABEL_COLUMN,
+                SEX_COLUMN,
+            ],
             dropna=False,
         )
         .size()
-        .reset_index(name="COUNT")
+        .reset_index(
+            name="COUNT"
+        )
         .sort_values(
-            [LABEL_COLUMN, SEX_COLUMN],
+            [
+                LABEL_COLUMN,
+                SEX_COLUMN,
+            ],
             kind="stable",
         )
-        .reset_index(drop=True)
+        .reset_index(
+            drop=True
+        )
     )
 
     table["PERCENT"] = (
-        table["COUNT"] / len(df) * 100
+        table["COUNT"]
+        / len(df)
+        * 100
     ).round(2)
 
     return table
@@ -600,18 +1331,41 @@ def print_split_summary(
     """
     print()
     print("=" * 80)
-    print(f"{dataset_name} SPLIT SUMMARY")
+    print(
+        f"{dataset_name} SPLIT SUMMARY"
+    )
     print("=" * 80)
 
-    all_splits = [("test", test_df)] + [
-        (f"fold{index}", fold)
-        for index, fold in enumerate(folds, start=1)
+    all_splits = [
+        (
+            "test",
+            test_df,
+        )
+    ] + [
+        (
+            f"fold{index}",
+            fold,
+        )
+        for index, fold in enumerate(
+            folds,
+            start=1,
+        )
     ]
 
     for split_name, split_df in all_splits:
         print()
-        print(f"{split_name}: {len(split_df)} samples")
-        print(distribution_table(split_df).to_string(index=False))
+        print(
+            f"{split_name}: "
+            f"{len(split_df)} samples"
+        )
+
+        print(
+            distribution_table(
+                split_df
+            ).to_string(
+                index=False
+            )
+        )
 
 
 def verify_merged_split(
@@ -621,55 +1375,88 @@ def verify_merged_split(
     split_name,
 ):
     """
-    Verify that a merged split contains exactly the concatenated TUM and
-    LMU split rows.
+    Verify that a merged split exactly equals the concatenation of
+    its corresponding TUM and LMU splits, including duplicate rows.
     """
-    expected_rows = len(tum_df) + len(lmu_df)
+    expected_df = pd.concat(
+        [
+            tum_df,
+            lmu_df,
+        ],
+        axis=0,
+        ignore_index=True,
+        sort=False,
+    )
 
-    if len(merged_df) != expected_rows:
+    if len(merged_df) != len(expected_df):
         raise AssertionError(
-            f"{split_name}: expected {expected_rows} merged rows, "
+            f"{split_name}: expected {len(expected_df)} rows, "
             f"but found {len(merged_df)}."
         )
 
-    expected_set = row_identity_set(
-        pd.concat([tum_df, lmu_df], ignore_index=True)
+    # Align column order before comparison.
+    expected_df = expected_df.reindex(
+        columns=merged_df.columns
     )
-    merged_set = row_identity_set(merged_df)
 
-    if expected_set != merged_set:
-        raise AssertionError(
-            f"{split_name}: merged contents do not equal "
-            "TUM + LMU contents."
+    try:
+        pd.testing.assert_frame_equal(
+            merged_df.reset_index(drop=True),
+            expected_df.reset_index(drop=True),
+            check_dtype=False,
+            check_like=False,
         )
 
-def print_dataset_statistics(df, dataset_name):
+    except AssertionError as error:
+        raise AssertionError(
+            f"{split_name}: merged dataframe does not exactly equal "
+            f"TUM + LMU.\n{error}"
+        ) from error
+
+    print(
+        f"{split_name}: verified as exact TUM + LMU concatenation."
+    )
+
+
+def print_dataset_statistics(
+    df,
+    dataset_name,
+):
     """
-    Print:
-      - total number of samples;
-      - number and percentage for each SEX value;
-      - number and percentage for each LABEL value;
-      - number and percentage for each LABEL × SEX combination.
+    Print sample, SEX, LABEL, and LABEL × SEX counts.
     """
     print()
     print("=" * 80)
-    print(f"{dataset_name} DATASET STATISTICS")
+    print(
+        f"{dataset_name} DATASET STATISTICS"
+    )
     print("=" * 80)
 
-    total_samples = len(df)
-    print(f"Total samples: {total_samples}")
+    total_samples = len(
+        df
+    )
+
+    print(
+        f"Total samples: {total_samples}"
+    )
 
     print()
     print("SEX distribution")
     print("-" * 40)
 
-    sex_counts = df[SEX_COLUMN].value_counts(
+    sex_counts = df[
+        SEX_COLUMN
+    ].value_counts(
         dropna=False,
         sort=False,
     )
 
     for sex_value, count in sex_counts.items():
-        percentage = 100 * count / total_samples if total_samples else 0
+        percentage = (
+            100 * count / total_samples
+            if total_samples
+            else 0
+        )
 
         print(
             f"SEX={sex_value}: "
@@ -681,13 +1468,19 @@ def print_dataset_statistics(df, dataset_name):
     print("LABEL distribution")
     print("-" * 40)
 
-    label_counts = df[LABEL_COLUMN].value_counts(
+    label_counts = df[
+        LABEL_COLUMN
+    ].value_counts(
         dropna=False,
         sort=False,
     )
 
     for label_value, count in label_counts.items():
-        percentage = 100 * count / total_samples if total_samples else 0
+        percentage = (
+            100 * count / total_samples
+            if total_samples
+            else 0
+        )
 
         print(
             f"LABEL={label_value}: "
@@ -701,20 +1494,35 @@ def print_dataset_statistics(df, dataset_name):
 
     joint_counts = (
         df.groupby(
-            [LABEL_COLUMN, SEX_COLUMN],
+            [
+                LABEL_COLUMN,
+                SEX_COLUMN,
+            ],
             dropna=False,
         )
         .size()
-        .reset_index(name="COUNT")
+        .reset_index(
+            name="COUNT"
+        )
         .sort_values(
-            [LABEL_COLUMN, SEX_COLUMN],
+            [
+                LABEL_COLUMN,
+                SEX_COLUMN,
+            ],
             kind="stable",
         )
     )
 
     for _, row in joint_counts.iterrows():
-        count = int(row["COUNT"])
-        percentage = 100 * count / total_samples if total_samples else 0
+        count = int(
+            row["COUNT"]
+        )
+
+        percentage = (
+            100 * count / total_samples
+            if total_samples
+            else 0
+        )
 
         print(
             f"LABEL={row[LABEL_COLUMN]}, "
@@ -722,6 +1530,31 @@ def print_dataset_statistics(df, dataset_name):
             f"{count} samples "
             f"({percentage:.2f}%)"
         )
+
+    print()
+    print("ECG interval availability")
+    print("-" * 40)
+
+    print(
+        f"QRSADM available: "
+        f"{int(df[QRS_COLUMN].notna().sum())}"
+    )
+
+    print(
+        f"PQADM available:  "
+        f"{int(df[PQ_COLUMN].notna().sum())}"
+    )
+
+    print(
+        f"Both available:   "
+        f"{int(
+            (
+                df[QRS_COLUMN].notna()
+                & df[PQ_COLUMN].notna()
+            ).sum()
+        )}"
+    )
+
 
 # ============================================================
 # MAIN
@@ -733,75 +1566,136 @@ def main():
     print("=" * 80)
 
     # --------------------------------------------------------
-    # 1. Load Excel files
+    # 1. Load primary TUM and LMU datasets
     # --------------------------------------------------------
     if not TUM_EXCEL_PATH.exists():
         raise FileNotFoundError(
-            f"TUM Excel file does not exist: {TUM_EXCEL_PATH}"
+            f"TUM Excel file does not exist: "
+            f"{TUM_EXCEL_PATH}"
         )
 
     if not LMU_EXCEL_PATH.exists():
         raise FileNotFoundError(
-            f"LMU Excel file does not exist: {LMU_EXCEL_PATH}"
+            f"LMU Excel file does not exist: "
+            f"{LMU_EXCEL_PATH}"
         )
 
-    tum_df = pd.read_excel(TUM_EXCEL_PATH)
-    lmu_df = pd.read_excel(LMU_EXCEL_PATH)
+    tum_df = pd.read_excel(
+        TUM_EXCEL_PATH
+    )
 
-    validate_required_columns(tum_df, "TUM")
-    validate_required_columns(lmu_df, "LMU")
+    lmu_df = pd.read_excel(
+        LMU_EXCEL_PATH
+    )
 
-    tum_id_column = find_id_column(tum_df, ID_COLUMN)
-    lmu_id_column = find_id_column(lmu_df, ID_COLUMN)
+    validate_required_columns(
+        tum_df,
+        "TUM",
+    )
 
-    print(f"TUM ID column: {tum_id_column}")
-    print(f"LMU ID column: {lmu_id_column}")
+    validate_required_columns(
+        lmu_df,
+        "LMU",
+    )
 
-    # The two files should normally have the same schema.
-    if list(tum_df.columns) != list(lmu_df.columns):
-        print()
-        print("WARNING:")
-        print("TUM and LMU do not have identical column order/schema.")
-        print("Merged data will use the union of their columns.")
-        print("Missing columns in either dataset will contain NaN.")
+    tum_id_column = find_id_column(
+        tum_df,
+        ID_COLUMN,
+    )
+
+    lmu_id_column = find_id_column(
+        lmu_df,
+        ID_COLUMN,
+    )
+
+    print(
+        f"TUM ID column: {tum_id_column}"
+    )
+
+    print(
+        f"LMU ID column: {lmu_id_column}"
+    )
 
     # --------------------------------------------------------
-    # 2. Find all available images
+    # 2. Find available images
     # --------------------------------------------------------
-    image_ids = collect_image_identifiers(IMAGE_ROOT)
+    image_ids = collect_image_identifiers(
+        IMAGE_ROOT
+    )
 
     # --------------------------------------------------------
-    # 3. Remove rows without images
+    # 3. Remove rows without corresponding images
     # --------------------------------------------------------
-    tum_cleaned, tum_removed = clean_dataframe_using_images(
-        df=tum_df,
-        image_ids=image_ids,
-        id_column=tum_id_column,
+    tum_cleaned, tum_removed = (
+        clean_dataframe_using_images(
+            df=tum_df,
+            image_ids=image_ids,
+            id_column=tum_id_column,
+            dataset_name="TUM",
+        )
+    )
+
+    lmu_cleaned, lmu_removed = (
+        clean_dataframe_using_images(
+            df=lmu_df,
+            image_ids=image_ids,
+            id_column=lmu_id_column,
+            dataset_name="LMU",
+        )
+    )
+
+    # --------------------------------------------------------
+    # 4. Load and attach ECG interval values
+    # --------------------------------------------------------
+    tum_interval_df = load_interval_table(
+        interval_path=TUM_ECG_INTERVAL_PATH,
         dataset_name="TUM",
     )
 
-    lmu_cleaned, lmu_removed = clean_dataframe_using_images(
-        df=lmu_df,
-        image_ids=image_ids,
-        id_column=lmu_id_column,
+    lmu_interval_df = load_interval_table(
+        interval_path=LMU_ECG_INTERVAL_PATH,
         dataset_name="LMU",
     )
 
-    # Save removed rows for inspection.
-    removed_output_directory = SPLIT_OUTPUT_ROOT / "removed_rows"
-    removed_output_directory.mkdir(parents=True, exist_ok=True)
+    tum_cleaned = add_ecg_intervals(
+        dataset_df=tum_cleaned,
+        dataset_id_column=tum_id_column,
+        interval_df=tum_interval_df,
+        dataset_name="TUM",
+    )
+
+    lmu_cleaned = add_ecg_intervals(
+        dataset_df=lmu_cleaned,
+        dataset_id_column=lmu_id_column,
+        interval_df=lmu_interval_df,
+        dataset_name="LMU",
+    )
+
+    # --------------------------------------------------------
+    # 5. Save removed and cleaned datasets
+    # --------------------------------------------------------
+    removed_output_directory = (
+        SPLIT_OUTPUT_ROOT
+        / "removed_rows"
+    )
+
+    removed_output_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     tum_removed.to_excel(
-        removed_output_directory / "tum_removed_missing_images.xlsx",
+        removed_output_directory
+        / "tum_removed_missing_images.xlsx",
         index=False,
     )
 
     lmu_removed.to_excel(
-        removed_output_directory / "lmu_removed_missing_images.xlsx",
+        removed_output_directory
+        / "lmu_removed_missing_images.xlsx",
         index=False,
     )
 
-    # Save cleaned source datasets.
     tum_cleaned.to_excel(
         TUM_CLEANED_OUTPUT_PATH,
         index=False,
@@ -813,12 +1707,16 @@ def main():
     )
 
     # --------------------------------------------------------
-    # 4. Create complete merged dataset
+    # 6. Create and save merged dataset
     # --------------------------------------------------------
     entire_df = pd.concat(
-        [tum_cleaned, lmu_cleaned],
+        [
+            tum_cleaned,
+            lmu_cleaned,
+        ],
         axis=0,
         ignore_index=True,
+        sort=False,
     )
 
     entire_df.to_excel(
@@ -826,7 +1724,28 @@ def main():
         index=False,
     )
 
-    # Print statistics for the complete cleaned datasets.
+    # --------------------------------------------------------
+    # 7. Create ECG interval distribution plots
+    # --------------------------------------------------------
+    plot_domain_distribution(
+        tum_df=tum_cleaned,
+        lmu_df=lmu_cleaned,
+        column=PQ_COLUMN,
+        x_label="PQ interval (ms)",
+        output_path=PQ_DISTRIBUTION_PLOT_PATH,
+    )
+
+    plot_domain_distribution(
+        tum_df=tum_cleaned,
+        lmu_df=lmu_cleaned,
+        column=QRS_COLUMN,
+        x_label="QRS duration (ms)",
+        output_path=QRS_DISTRIBUTION_PLOT_PATH,
+    )
+
+    # --------------------------------------------------------
+    # 8. Print complete dataset statistics
+    # --------------------------------------------------------
     print_dataset_statistics(
         df=tum_cleaned,
         dataset_name="TUM CLEANED DATASET",
@@ -843,7 +1762,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # 5. Create fixed domain-specific splits
+    # 9. Create fixed domain-specific test sets and folds
     # --------------------------------------------------------
     tum_test, tum_folds = create_fixed_test_and_folds(
         df=tum_cleaned,
@@ -851,7 +1770,6 @@ def main():
         random_seed=RANDOM_SEED,
     )
 
-    # Use another deterministic seed so that random ordering is independent.
     lmu_test, lmu_folds = create_fixed_test_and_folds(
         df=lmu_cleaned,
         dataset_name="LMU",
@@ -859,7 +1777,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # 6. Create merged splits as exact TUM + LMU combinations
+    # 10. Create merged splits as exact TUM + LMU combinations
     # --------------------------------------------------------
     merged_test, merged_folds = concatenate_matching_splits(
         tum_test=tum_test,
@@ -869,7 +1787,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # 7. Verify merged identities
+    # 11. Verify merged identities
     # --------------------------------------------------------
     verify_merged_split(
         tum_df=tum_test,
@@ -878,44 +1796,57 @@ def main():
         split_name="merged test",
     )
 
-    for fold_index in range(N_FOLDS):
+    for fold_index in range(
+        N_FOLDS
+    ):
         verify_merged_split(
-            tum_df=tum_folds[fold_index],
-            lmu_df=lmu_folds[fold_index],
-            merged_df=merged_folds[fold_index],
-            split_name=f"merged fold{fold_index + 1}",
+            tum_df=tum_folds[
+                fold_index
+            ],
+            lmu_df=lmu_folds[
+                fold_index
+            ],
+            merged_df=merged_folds[
+                fold_index
+            ],
+            split_name=(
+                f"merged fold"
+                f"{fold_index + 1}"
+            ),
         )
 
-    validate_partition(
-        original_df=entire_df,
-        test_df=merged_test,
-        folds=merged_folds,
-        dataset_name="MERGED",
-    )
-
     # --------------------------------------------------------
-    # 8. Save split files
+    # 12. Save split files
     # --------------------------------------------------------
     save_split_collection(
-        output_directory=SPLIT_OUTPUT_ROOT / "tum",
+        output_directory=(
+            SPLIT_OUTPUT_ROOT
+            / "tum"
+        ),
         test_df=tum_test,
         folds=tum_folds,
     )
 
     save_split_collection(
-        output_directory=SPLIT_OUTPUT_ROOT / "lmu",
+        output_directory=(
+            SPLIT_OUTPUT_ROOT
+            / "lmu"
+        ),
         test_df=lmu_test,
         folds=lmu_folds,
     )
 
     save_split_collection(
-        output_directory=SPLIT_OUTPUT_ROOT / "merged",
+        output_directory=(
+            SPLIT_OUTPUT_ROOT
+            / "merged"
+        ),
         test_df=merged_test,
         folds=merged_folds,
     )
 
     # --------------------------------------------------------
-    # 9. Print detailed distributions
+    # 13. Print detailed split distributions
     # --------------------------------------------------------
     print_split_summary(
         dataset_name="TUM",
@@ -936,34 +1867,117 @@ def main():
     )
 
     # --------------------------------------------------------
-    # 10. Final concise summary
+    # 14. Final concise summary
     # --------------------------------------------------------
     print()
     print("=" * 80)
     print("FINAL SUMMARY")
     print("=" * 80)
 
-    print(f"TUM samples left:       {len(tum_cleaned)}")
-    print(f"LMU samples left:       {len(lmu_cleaned)}")
-    print(f"Merged samples:         {len(entire_df)}")
+    print(
+        f"TUM samples left:       "
+        f"{len(tum_cleaned)}"
+    )
+
+    print(
+        f"LMU samples left:       "
+        f"{len(lmu_cleaned)}"
+    )
+
+    print(
+        f"Merged samples:         "
+        f"{len(entire_df)}"
+    )
 
     print()
-    print(f"TUM test samples:       {len(tum_test)}")
-    print(f"LMU test samples:       {len(lmu_test)}")
-    print(f"Merged test samples:    {len(merged_test)}")
+    print(
+        f"TUM with QRSADM:        "
+        f"{int(tum_cleaned[QRS_COLUMN].notna().sum())}"
+    )
+
+    print(
+        f"TUM with PQADM:         "
+        f"{int(tum_cleaned[PQ_COLUMN].notna().sum())}"
+    )
+
+    print(
+        f"LMU with QRSADM:        "
+        f"{int(lmu_cleaned[QRS_COLUMN].notna().sum())}"
+    )
+
+    print(
+        f"LMU with PQADM:         "
+        f"{int(lmu_cleaned[PQ_COLUMN].notna().sum())}"
+    )
 
     print()
-    print(f"Cleaned TUM saved to:   {TUM_CLEANED_OUTPUT_PATH}")
-    print(f"Cleaned LMU saved to:   {LMU_CLEANED_OUTPUT_PATH}")
-    print(f"Entire dataset saved:   {ENTIRE_OUTPUT_PATH}")
-    print(f"Split folders saved:    {SPLIT_OUTPUT_ROOT}")
+    print(
+        f"TUM test samples:       "
+        f"{len(tum_test)}"
+    )
+
+    print(
+        f"LMU test samples:       "
+        f"{len(lmu_test)}"
+    )
+
+    print(
+        f"Merged test samples:    "
+        f"{len(merged_test)}"
+    )
 
     print()
-    print("Merged test and folds were verified as exact combinations:")
-    print("  merged/test.xlsx  = tum/test.xlsx  + lmu/test.xlsx")
-    print("  merged/fold1.xlsx = tum/fold1.xlsx + lmu/fold1.xlsx")
+    print(
+        f"Cleaned TUM saved to:   "
+        f"{TUM_CLEANED_OUTPUT_PATH}"
+    )
+
+    print(
+        f"Cleaned LMU saved to:   "
+        f"{LMU_CLEANED_OUTPUT_PATH}"
+    )
+
+    print(
+        f"Entire dataset saved:   "
+        f"{ENTIRE_OUTPUT_PATH}"
+    )
+
+    print(
+        f"Split folders saved:    "
+        f"{SPLIT_OUTPUT_ROOT}"
+    )
+
+    print(
+        f"PQ plot saved to:       "
+        f"{PQ_DISTRIBUTION_PLOT_PATH}"
+    )
+
+    print(
+        f"QRS plot saved to:      "
+        f"{QRS_DISTRIBUTION_PLOT_PATH}"
+    )
+
+    print()
+    print(
+        "Merged test and folds were verified as exact combinations:"
+    )
+
+    print(
+        "  merged/test.xlsx  = "
+        "tum/test.xlsx  + lmu/test.xlsx"
+    )
+
+    print(
+        "  merged/fold1.xlsx = "
+        "tum/fold1.xlsx + lmu/fold1.xlsx"
+    )
+
     print("  ...")
-    print("  merged/fold5.xlsx = tum/fold5.xlsx + lmu/fold5.xlsx")
+
+    print(
+        "  merged/fold5.xlsx = "
+        "tum/fold5.xlsx + lmu/fold5.xlsx"
+    )
 
 
 if __name__ == "__main__":
