@@ -1,0 +1,22 @@
+{
+  "fold_model": 1,
+  "training_files": [
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold2.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold3.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold4.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold5.xlsx"
+  ],
+  "validation_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold1.xlsx",
+  "final_context_files": [
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold1.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold2.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold3.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold4.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/merged/fold5.xlsx"
+  ],
+  "final_test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx",
+  "training_samples": 16,
+  "validation_samples": 4,
+  "final_context_samples": 20,
+  "test_samples": 237
+}

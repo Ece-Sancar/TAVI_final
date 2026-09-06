@@ -1,0 +1,54 @@
+SVM INDEPENDENT TEST RESULTS
+========================================================================
+
+Dataset              : lmu
+Training folder      : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/test.xlsx
+
+The SVM was trained once on fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+DATA
+------------------------------------------------------------------------
+Training samples     : 670
+Test samples         : 171
+Number of features   : 38
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy              : 0.6082
+F1 Score              : 0.5890
+AUC-ROC               : 0.6773
+AUC-PR                : 0.7231
+No Event Accuracy     : 0.6364
+Pacemaker Accuracy    : 0.5783
+False Positive Rate   : 36.36%
+False Negative Rate   : 42.17%
+False Positive Fraction: 18.71%
+False Negative Fraction: 20.47%
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                   56               32
+True Pacemaker                  35               48
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/svm_lmu/svm_test_predictions.xlsx
+
+Metrics:
+results/svm_lmu/evaluation_metrics.json
+
+Raw confusion matrix:
+results/svm_lmu/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/svm_lmu/confusion_matrix_test_normalized.png
+
+Calibration plot:
+results/svm_lmu/calibration_test.png

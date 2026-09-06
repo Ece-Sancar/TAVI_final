@@ -1,0 +1,34 @@
+FINE-TUNED TABPFN SUMMARY
+========================================================================
+
+Mode: train
+Training data percentage: 50%
+Training dataset: merged
+Training folder: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/50_percent/merged
+Test dataset: merged
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx
+Final evaluation uses test.xlsx only.
+
+MEAN ± STD ACROSS FIVE FOLD MODELS
+------------------------------------------------------------------------
+accuracy: 0.773840 ± 0.006856
+f1_score: 0.730275 ± 0.016018
+auc_roc: 0.881191 ± 0.000747
+log_loss: 0.393924 ± 0.000877
+pacer_accuracy: 0.627586 ± 0.042021
+no_event_accuracy: 0.914050 ± 0.037909
+false_negatives: 43.200000 ± 4.874423
+false_positives: 10.400000 ± 4.586938
+
+FIVE-MODEL ENSEMBLE
+------------------------------------------------------------------------
+accuracy: 0.776371
+f1_score: 0.730964
+auc_roc: 0.882231
+log_loss: 0.393643
+no_event_accuracy: 0.925620
+pacer_accuracy: 0.620690
+true_negatives: 112
+false_positives: 9
+false_negatives: 44
+true_positives: 72

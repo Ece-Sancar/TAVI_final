@@ -1,0 +1,4 @@
+Feature,TUM_N,LMU_N,Reason
+ID,,,Explicitly excluded
+LABEL,,,Explicitly excluded
+NTPROBNPPRE,227.0,1.0,Insufficient non-missing values

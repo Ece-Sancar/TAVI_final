@@ -1,0 +1,17 @@
+{
+  "dataset": "lmu",
+  "dataset_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu",
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/test.xlsx",
+  "backend": "pytorch",
+  "training_samples": 670,
+  "test_samples": 171,
+  "number_of_features": 38,
+  "accuracy": 0.6666666666666666,
+  "f1_score": 0.47706422018348627,
+  "no_event_accuracy": 1.0,
+  "pacemaker_accuracy": 0.3132530120481928,
+  "true_negatives": 88,
+  "false_positives": 0,
+  "false_negatives": 57,
+  "true_positives": 26
+}

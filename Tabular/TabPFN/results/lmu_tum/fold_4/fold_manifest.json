@@ -1,0 +1,22 @@
+{
+  "fold_model": 4,
+  "training_files": [
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold1.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold2.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold3.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold5.xlsx"
+  ],
+  "validation_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold4.xlsx",
+  "final_context_files": [
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold1.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold2.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold3.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold4.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/fold5.xlsx"
+  ],
+  "final_test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx",
+  "training_samples": 536,
+  "validation_samples": 134,
+  "final_context_samples": 670,
+  "test_samples": 66
+}

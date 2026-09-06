@@ -1,0 +1,49 @@
+TABFM INDEPENDENT TEST RESULTS
+========================================================================
+
+Dataset              : merged
+Training folder      : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx
+Backend              : pytorch
+
+The TabFM classifier was trained once on fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+DATA
+------------------------------------------------------------------------
+Training samples     : 930
+Test samples         : 237
+Number of features   : 38
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy          : 0.6456
+F1 Score          : 0.5385
+No Event Accuracy : 0.8595
+Pacemaker Accuracy: 0.4224
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                  104               17
+True Pacemaker                  67               49
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/tabfm_merged/tabfm_test_predictions.xlsx
+
+Classification report:
+results/tabfm_merged/classification_report.csv
+
+Metrics:
+results/tabfm_merged/evaluation_metrics.json
+
+Raw confusion matrix:
+results/tabfm_merged/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/tabfm_merged/confusion_matrix_test_normalized.png

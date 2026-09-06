@@ -1,0 +1,54 @@
+SVM INDEPENDENT TEST RESULTS
+========================================================================
+
+Dataset              : merged
+Training folder      : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx
+
+The SVM was trained once on fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+DATA
+------------------------------------------------------------------------
+Training samples     : 930
+Test samples         : 237
+Number of features   : 38
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy              : 0.6329
+F1 Score              : 0.6201
+AUC-ROC               : 0.6799
+AUC-PR                : 0.6939
+No Event Accuracy     : 0.6529
+Pacemaker Accuracy    : 0.6121
+False Positive Rate   : 34.71%
+False Negative Rate   : 38.79%
+False Positive Fraction: 17.72%
+False Negative Fraction: 18.99%
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                   79               42
+True Pacemaker                  45               71
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/svm_merged/svm_test_predictions.xlsx
+
+Metrics:
+results/svm_merged/evaluation_metrics.json
+
+Raw confusion matrix:
+results/svm_merged/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/svm_merged/confusion_matrix_test_normalized.png
+
+Calibration plot:
+results/svm_merged/calibration_test.png

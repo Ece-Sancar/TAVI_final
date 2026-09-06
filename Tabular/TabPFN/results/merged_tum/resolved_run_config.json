@@ -1,0 +1,48 @@
+{
+  "dataset_root": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits",
+  "train_dataset": "merged",
+  "test_dataset": "tum",
+  "pretrained": {
+    "checkpoint_dir": "/home/ubuntu/TAVI_new/Tabular/tabpfn/results/merged_final",
+    "train_dataset": "merged"
+  },
+  "id_col": "ID",
+  "label_col": "LABEL",
+  "output_dir": "results/merged_tum",
+  "n_folds": 5,
+  "random_seed": 42,
+  "device": "cuda",
+  "finetuning": {
+    "epochs": 300,
+    "learning_rate": 1e-05,
+    "batch_size": 16,
+    "meta_batch_size": 1,
+    "patience": 15
+  },
+  "episodes_per_epoch": 4,
+  "evaluation": {
+    "n_inference_context_samples": null
+  },
+  "feature_importance": {
+    "enabled": true,
+    "n_repeats": 5,
+    "metadata_path": "/home/ubuntu/TAVI_new/dataset/new_features_table.xlsx"
+  },
+  "resolved": {
+    "mode": "train",
+    "training_dataset": "merged",
+    "training_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged",
+    "test_dataset": "tum",
+    "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx",
+    "fold_files": [
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold1.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold2.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold3.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold4.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold5.xlsx"
+    ],
+    "test_policy": "Final evaluation always uses only test.xlsx from test_dataset.",
+    "training_policy": "For model i, use fold i as validation and the other four folds for fine-tuning.",
+    "final_context_policy": "After checkpoint selection, use all five non-test folds as the TabPFN context for prediction on test.xlsx."
+  }
+}

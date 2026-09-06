@@ -2,3 +2,9 @@ ECG.zip
 /dataset/ecg/ecg_crops_lmu/
 /dataset/ecg/ecg_pdfs_lmu/
 /dataset/ecg/ecg_signals_lmu/
+*pt
+*/__pycache__/
+*/checkpoints/
+*/lightning_logs/
+*/gradcam/
+*/results/

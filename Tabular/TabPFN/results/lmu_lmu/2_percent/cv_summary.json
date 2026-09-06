@@ -1,0 +1,59 @@
+{
+  "mode": "train",
+  "data_percentage": 2,
+  "training_dataset": "lmu",
+  "training_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/2_percent/lmu",
+  "test_dataset": "lmu",
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/test.xlsx",
+  "test_policy": "Final evaluation always uses only test.xlsx from test_dataset.",
+  "number_of_features": 38,
+  "number_of_non_test_samples": 10,
+  "number_of_test_samples": 171,
+  "number_of_fold_models": 5,
+  "mean_std_across_fold_models": {
+    "accuracy": {
+      "mean": 0.5450292397660819,
+      "std": 0.03168705774068787
+    },
+    "f1_score": {
+      "mean": 0.6237842727767413,
+      "std": 0.007426851901275202
+    },
+    "auc_roc": {
+      "mean": 0.6291347207009858,
+      "std": 0.015992831770986433
+    },
+    "log_loss": {
+      "mean": 0.6851515839846409,
+      "std": 0.0037953968175712385
+    },
+    "pacer_accuracy": {
+      "mean": 0.7759036144578313,
+      "std": 0.031046021028253306
+    },
+    "no_event_accuracy": {
+      "mean": 0.32727272727272727,
+      "std": 0.09045340337332909
+    },
+    "false_negatives": {
+      "mean": 18.6,
+      "std": 2.576819745345025
+    },
+    "false_positives": {
+      "mean": 59.2,
+      "std": 7.95989949685296
+    }
+  },
+  "five_model_ensemble_metrics": {
+    "accuracy": 0.5497076023391813,
+    "f1_score": 0.6280193236714976,
+    "auc_roc": 0.6347207009857613,
+    "log_loss": 0.6825399993065104,
+    "no_event_accuracy": 0.32954545454545453,
+    "pacer_accuracy": 0.7831325301204819,
+    "true_negatives": 29,
+    "false_positives": 59,
+    "false_negatives": 18,
+    "true_positives": 65
+  }
+}

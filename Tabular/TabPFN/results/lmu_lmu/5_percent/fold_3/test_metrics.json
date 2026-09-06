@@ -1,0 +1,23 @@
+{
+  "accuracy": 0.8304093567251462,
+  "f1_score": 0.8,
+  "auc_roc": 0.8365279299014239,
+  "log_loss": 0.6110112475674434,
+  "no_event_accuracy": 0.9545454545454546,
+  "pacer_accuracy": 0.6987951807228916,
+  "true_negatives": 84,
+  "false_positives": 4,
+  "false_negatives": 25,
+  "true_positives": 58,
+  "data_percentage": 5,
+  "fold_model": 3,
+  "best_validation_loss": 0.1196069448643089,
+  "epochs_trained": 45,
+  "training_samples": 24,
+  "validation_samples": 6,
+  "final_context_samples": 30,
+  "test_samples": 171,
+  "training_dataset": "lmu",
+  "test_dataset": "lmu",
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/test.xlsx"
+}

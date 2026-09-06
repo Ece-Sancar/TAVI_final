@@ -1,0 +1,49 @@
+TABFM INDEPENDENT TEST RESULTS
+========================================================================
+
+Dataset              : lmu
+Training folder      : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/test.xlsx
+Backend              : pytorch
+
+The TabFM classifier was trained once on fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+DATA
+------------------------------------------------------------------------
+Training samples     : 670
+Test samples         : 171
+Number of features   : 38
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy          : 0.6667
+F1 Score          : 0.4771
+No Event Accuracy : 1.0000
+Pacemaker Accuracy: 0.3133
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                   88                0
+True Pacemaker                  57               26
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/tabfm_lmu/tabfm_test_predictions.xlsx
+
+Classification report:
+results/tabfm_lmu/classification_report.csv
+
+Metrics:
+results/tabfm_lmu/evaluation_metrics.json
+
+Raw confusion matrix:
+results/tabfm_lmu/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/tabfm_lmu/confusion_matrix_test_normalized.png

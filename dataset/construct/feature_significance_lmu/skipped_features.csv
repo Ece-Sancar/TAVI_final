@@ -1,0 +1,4 @@
+Feature,NE_N,PA_N,Reason
+DM,0,307,Insufficient non-missing values
+CABGPRE,0,171,Insufficient non-missing values
+NTPROBNPPRE,0,1,Insufficient non-missing values

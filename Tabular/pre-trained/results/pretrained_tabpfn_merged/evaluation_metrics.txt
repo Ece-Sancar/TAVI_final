@@ -1,0 +1,45 @@
+PRETRAINED TABPFN TEST RESULTS
+========================================================================
+
+Dataset                 : merged
+Training/context folder : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged
+Independent test file   : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx
+
+Training/context samples: 930
+Independent test samples: 237
+Number of features      : 38
+
+The model was fitted once using fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy          : 0.7764
+F1 Score          : 0.7389
+AUC-ROC           : 0.8763
+AUC-PR            : 0.8909
+No Event Accuracy : 0.9008
+Pacemaker Accuracy: 0.6466
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                  109               12
+True Pacemaker                  41               75
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/pretrained_tabpfn_merged/tabpfn_test_predictions.xlsx
+
+Metrics:
+results/pretrained_tabpfn_merged/evaluation_metrics.json
+
+Raw confusion matrix:
+results/pretrained_tabpfn_merged/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/pretrained_tabpfn_merged/confusion_matrix_test_normalized.png

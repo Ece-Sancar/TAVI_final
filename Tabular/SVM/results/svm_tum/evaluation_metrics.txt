@@ -1,0 +1,54 @@
+SVM INDEPENDENT TEST RESULTS
+========================================================================
+
+Dataset              : tum
+Training folder      : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx
+
+The SVM was trained once on fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+DATA
+------------------------------------------------------------------------
+Training samples     : 260
+Test samples         : 66
+Number of features   : 38
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy              : 0.5909
+F1 Score              : 0.5714
+AUC-ROC               : 0.6198
+AUC-PR                : 0.5879
+No Event Accuracy     : 0.6364
+Pacemaker Accuracy    : 0.5455
+False Positive Rate   : 36.36%
+False Negative Rate   : 45.45%
+False Positive Fraction: 18.18%
+False Negative Fraction: 22.73%
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                   21               12
+True Pacemaker                  15               18
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/svm_tum/svm_test_predictions.xlsx
+
+Metrics:
+results/svm_tum/evaluation_metrics.json
+
+Raw confusion matrix:
+results/svm_tum/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/svm_tum/confusion_matrix_test_normalized.png
+
+Calibration plot:
+results/svm_tum/calibration_test.png

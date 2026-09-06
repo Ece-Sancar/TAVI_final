@@ -1,0 +1,26 @@
+{
+  "dataset": "tum",
+  "dataset_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum",
+  "training_files": [
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/fold1.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/fold2.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/fold3.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/fold4.xlsx",
+    "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/fold5.xlsx"
+  ],
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx",
+  "training_samples": 260,
+  "test_samples": 66,
+  "number_of_features": 38,
+  "decision_threshold": 0.5,
+  "accuracy": 0.5,
+  "f1_score": 0.32653061224489793,
+  "auc_roc": 0.5821854912764004,
+  "auc_pr": 0.5495363877087648,
+  "no_event_accuracy": 0.7575757575757576,
+  "pacemaker_accuracy": 0.24242424242424243,
+  "true_negatives": 25,
+  "false_positives": 8,
+  "false_negatives": 25,
+  "true_positives": 8
+}

@@ -1,0 +1,22 @@
+{
+  "accuracy": 0.7721518987341772,
+  "f1_score": 0.7378640776699029,
+  "auc_roc": 0.8756055856369336,
+  "log_loss": 0.39256322766170115,
+  "no_event_accuracy": 0.8842975206611571,
+  "pacer_accuracy": 0.6551724137931034,
+  "true_negatives": 107,
+  "false_positives": 14,
+  "false_negatives": 40,
+  "true_positives": 76,
+  "fold_model": 1,
+  "best_validation_loss": 0.37863817944478384,
+  "epochs_trained": 22,
+  "training_samples": 744,
+  "validation_samples": 186,
+  "final_context_samples": 930,
+  "test_samples": 237,
+  "training_dataset": "merged",
+  "test_dataset": "merged",
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx"
+}

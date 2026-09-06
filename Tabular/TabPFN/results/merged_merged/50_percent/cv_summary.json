@@ -1,0 +1,59 @@
+{
+  "mode": "train",
+  "data_percentage": 50,
+  "training_dataset": "merged",
+  "training_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/data_size/50_percent/merged",
+  "test_dataset": "merged",
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx",
+  "test_policy": "Final evaluation always uses only test.xlsx from test_dataset.",
+  "number_of_features": 38,
+  "number_of_non_test_samples": 460,
+  "number_of_test_samples": 237,
+  "number_of_fold_models": 5,
+  "mean_std_across_fold_models": {
+    "accuracy": {
+      "mean": 0.7738396624472573,
+      "std": 0.006855728611507124
+    },
+    "f1_score": {
+      "mean": 0.7302748360662108,
+      "std": 0.01601808587377847
+    },
+    "auc_roc": {
+      "mean": 0.881191222570533,
+      "std": 0.0007466840984082934
+    },
+    "log_loss": {
+      "mean": 0.3939242266338958,
+      "std": 0.0008770478381205514
+    },
+    "pacer_accuracy": {
+      "mean": 0.6275862068965518,
+      "std": 0.04202088829984117
+    },
+    "no_event_accuracy": {
+      "mean": 0.9140495867768597,
+      "std": 0.03790857831794946
+    },
+    "false_negatives": {
+      "mean": 43.2,
+      "std": 4.874423042781577
+    },
+    "false_positives": {
+      "mean": 10.4,
+      "std": 4.586937976471886
+    }
+  },
+  "five_model_ensemble_metrics": {
+    "accuracy": 0.7763713080168776,
+    "f1_score": 0.7309644670050761,
+    "auc_roc": 0.8822314049586777,
+    "log_loss": 0.3936432248753695,
+    "no_event_accuracy": 0.9256198347107438,
+    "pacer_accuracy": 0.6206896551724138,
+    "true_negatives": 112,
+    "false_positives": 9,
+    "false_negatives": 44,
+    "true_positives": 72
+  }
+}

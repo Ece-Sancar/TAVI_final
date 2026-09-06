@@ -1,0 +1,23 @@
+{
+  "dataset": "lmu",
+  "dataset_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu",
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/test.xlsx",
+  "training_samples": 670,
+  "test_samples": 171,
+  "number_of_features": 38,
+  "n_estimators": 500,
+  "accuracy": 0.8304093567251462,
+  "f1_score": 0.8053691275167785,
+  "auc_roc": 0.914841182913472,
+  "auc_pr": 0.9275999189856439,
+  "no_event_accuracy": 0.9318181818181818,
+  "pacemaker_accuracy": 0.7228915662650602,
+  "false_positive_rate": 0.06818181818181818,
+  "false_negative_rate": 0.27710843373493976,
+  "false_positive_fraction": 0.03508771929824561,
+  "false_negative_fraction": 0.13450292397660818,
+  "true_negatives": 82,
+  "false_positives": 6,
+  "false_negatives": 23,
+  "true_positives": 60
+}

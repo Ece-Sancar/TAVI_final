@@ -1,0 +1,6 @@
+accuracy,f1_score,auc_roc,log_loss,no_event_accuracy,pacer_accuracy,true_negatives,false_positives,false_negatives,true_positives,fold_model,best_validation_loss,epochs_trained,training_samples,validation_samples,final_context_samples,test_samples,training_dataset,test_dataset,test_file
+0.5,0.6666666666666666,0.37098255280073456,2.3245489062682414,0.0,1.0,0,33,0,33,1,0.28343291051968905,27,536,134,670,66,lmu,tum,/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx
+0.5,0.6666666666666666,0.4095500459136823,2.6919366735079824,0.0,1.0,0,33,0,33,2,0.2341819730230738,31,536,134,670,66,lmu,tum,/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx
+0.5,0.6666666666666666,0.3526170798898072,1.7884636406611598,0.0,1.0,0,33,0,33,3,0.2728445903815456,16,536,134,670,66,lmu,tum,/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx
+0.5,0.6666666666666666,0.35169880624426086,2.1253852975025573,0.0,1.0,0,33,0,33,4,0.1853732463989464,18,536,134,670,66,lmu,tum,/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx
+0.5,0.6666666666666666,0.38751147842056927,2.0616677845945635,0.0,1.0,0,33,0,33,5,0.2664756318026808,26,536,134,670,66,lmu,tum,/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx

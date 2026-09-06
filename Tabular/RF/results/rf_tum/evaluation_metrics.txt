@@ -1,0 +1,61 @@
+RANDOM FOREST INDEPENDENT TEST RESULTS
+========================================================================
+
+Dataset              : tum
+Training folder      : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx
+
+The Random Forest was trained once on fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+DATA
+------------------------------------------------------------------------
+Training samples     : 260
+Test samples         : 66
+Number of features   : 38
+Number of trees      : 500
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy               : 0.5303
+F1 Score               : 0.5079
+AUC-ROC                : 0.5147
+AUC-PR                 : 0.5033
+No Event Accuracy      : 0.5758
+Pacemaker Accuracy     : 0.4848
+False Positive Rate    : 42.42%
+False Negative Rate    : 51.52%
+False Positive Fraction: 21.21%
+False Negative Fraction: 25.76%
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                   19               14
+True Pacemaker                  17               16
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/rf_tum/rf_test_predictions.xlsx
+
+Classification report:
+results/rf_tum/classification_report.csv
+
+Metrics:
+results/rf_tum/evaluation_metrics.json
+
+Raw confusion matrix:
+results/rf_tum/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/rf_tum/confusion_matrix_test_normalized.png
+
+Feature-importance table:
+results/rf_tum/feature_importance.csv
+
+Feature-importance plot:
+results/rf_tum/feature_importance.png

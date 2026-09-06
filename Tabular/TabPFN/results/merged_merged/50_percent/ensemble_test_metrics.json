@@ -1,0 +1,12 @@
+{
+  "accuracy": 0.7763713080168776,
+  "f1_score": 0.7309644670050761,
+  "auc_roc": 0.8822314049586777,
+  "log_loss": 0.3936432248753695,
+  "no_event_accuracy": 0.9256198347107438,
+  "pacer_accuracy": 0.6206896551724138,
+  "true_negatives": 112,
+  "false_positives": 9,
+  "false_negatives": 44,
+  "true_positives": 72
+}

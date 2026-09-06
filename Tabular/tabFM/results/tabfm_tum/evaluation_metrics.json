@@ -1,0 +1,17 @@
+{
+  "dataset": "tum",
+  "dataset_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum",
+  "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/tum/test.xlsx",
+  "backend": "pytorch",
+  "training_samples": 260,
+  "test_samples": 66,
+  "number_of_features": 38,
+  "accuracy": 0.5606060606060606,
+  "f1_score": 0.4727272727272727,
+  "no_event_accuracy": 0.7272727272727273,
+  "pacemaker_accuracy": 0.3939393939393939,
+  "true_negatives": 24,
+  "false_positives": 9,
+  "false_negatives": 20,
+  "true_positives": 13
+}

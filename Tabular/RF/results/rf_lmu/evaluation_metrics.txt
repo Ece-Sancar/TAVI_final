@@ -1,0 +1,61 @@
+RANDOM FOREST INDEPENDENT TEST RESULTS
+========================================================================
+
+Dataset              : lmu
+Training folder      : /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu
+Independent test file: /home/ubuntu/TAVI_final/dataset/construct/dataset_splits/lmu/test.xlsx
+
+The Random Forest was trained once on fold1.xlsx through fold5.xlsx.
+Final evaluation was performed only on test.xlsx.
+
+DATA
+------------------------------------------------------------------------
+Training samples     : 670
+Test samples         : 171
+Number of features   : 38
+Number of trees      : 500
+
+FINAL TEST METRICS
+------------------------------------------------------------------------
+Accuracy               : 0.8304
+F1 Score               : 0.8054
+AUC-ROC                : 0.9148
+AUC-PR                 : 0.9276
+No Event Accuracy      : 0.9318
+Pacemaker Accuracy     : 0.7229
+False Positive Rate    : 6.82%
+False Negative Rate    : 27.71%
+False Positive Fraction: 3.51%
+False Negative Fraction: 13.45%
+
+CONFUSION MATRIX
+------------------------------------------------------------------------
+Rows = true labels
+Columns = predicted labels
+
+                       Pred No Event    Pred Pacemaker
+True No Event                   82                6
+True Pacemaker                  23               60
+
+SAVED FILES
+------------------------------------------------------------------------
+Predictions:
+results/rf_lmu/rf_test_predictions.xlsx
+
+Classification report:
+results/rf_lmu/classification_report.csv
+
+Metrics:
+results/rf_lmu/evaluation_metrics.json
+
+Raw confusion matrix:
+results/rf_lmu/confusion_matrix_test.png
+
+Normalized confusion matrix:
+results/rf_lmu/confusion_matrix_test_normalized.png
+
+Feature-importance table:
+results/rf_lmu/feature_importance.csv
+
+Feature-importance plot:
+results/rf_lmu/feature_importance.png

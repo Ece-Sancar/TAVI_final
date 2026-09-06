@@ -92,6 +92,23 @@ ID_COLUMN_CANDIDATES = [
     "subject_id",
 ]
 
+# ============================================================
+# DATA-SIZE EXPERIMENT CONFIGURATION
+# ============================================================
+
+DATA_SIZE_PERCENTAGES = [
+    2,
+    5,
+    10,
+    20,
+    50,
+]
+
+DATA_SIZE_OUTPUT_ROOT = (
+    SPLIT_OUTPUT_ROOT
+    / "data_size"
+)
+
 
 # ============================================================
 # UTILITY FUNCTIONS
@@ -1279,6 +1296,877 @@ def concatenate_matching_splits(
         merged_folds,
     )
 
+# ============================================================
+# DATA-SIZE EXPERIMENT DATASETS
+# ============================================================
+
+def normalize_binary_label(value):
+    """
+    Normalize LABEL values only for balanced sampling.
+
+    The original LABEL values in the dataframe are NOT changed.
+    """
+    value = str(value).strip().lower()
+
+    mapping = {
+        "no event": 0,
+        "no_event": 0,
+        "noevent": 0,
+        "0": 0,
+        "pacer": 1,
+        "pacemaker": 1,
+        "1": 1,
+    }
+
+    if value not in mapping:
+        raise ValueError(
+            f"Unsupported LABEL value for data-size sampling: {value!r}"
+        )
+
+    return mapping[value]
+
+
+def attach_original_fold_number(
+    folds,
+):
+    """
+    Combine the five development folds while remembering which
+    original fold every row belongs to.
+
+    test.xlsx is never included.
+    """
+    parts = []
+
+    for fold_number, fold_df in enumerate(
+        folds,
+        start=1,
+    ):
+        part = fold_df.copy()
+
+        part["_ORIGINAL_FOLD"] = fold_number
+
+        parts.append(part)
+
+    development_df = pd.concat(
+        parts,
+        axis=0,
+        ignore_index=True,
+    )
+
+    development_df["_BINARY_LABEL"] = (
+        development_df[LABEL_COLUMN]
+        .map(normalize_binary_label)
+    )
+
+    return development_df
+
+
+def calculate_balanced_subset_size(
+    total_development_samples,
+    percentage,
+    n_folds,
+):
+    """
+    Determine a usable sample count for a percentage experiment.
+
+    Requirements:
+      1. Approximately matches the requested percentage.
+      2. Exactly balanced between labels.
+      3. Can be divided equally across all folds.
+      4. Every fold receives the same number from each label.
+
+    Therefore total sample count must be divisible by:
+
+        2 labels × n_folds
+
+    For 5 folds:
+        total must be divisible by 10.
+    """
+
+    requested = (
+        total_development_samples
+        * percentage
+        / 100.0
+    )
+
+    required_multiple = (
+        2 * n_folds
+    )
+
+    # Find the nearest valid multiple.
+    lower = (
+        int(requested)
+        // required_multiple
+        * required_multiple
+    )
+
+    upper = (
+        lower
+        + required_multiple
+    )
+
+    # Need at least one sample of each label in every fold.
+    lower = max(
+        lower,
+        required_multiple,
+    )
+
+    upper = max(
+        upper,
+        required_multiple,
+    )
+
+    if abs(lower - requested) <= abs(
+        upper - requested
+    ):
+        selected_total = lower
+    else:
+        selected_total = upper
+
+    return selected_total   
+
+
+def sample_balanced_development_subset(
+    folds,
+    percentage,
+    random_seed,
+    dataset_name,
+):
+    """
+    Create one balanced data-size experiment dataset.
+
+    The five original development folds are first combined.
+
+    Then:
+      1. A percentage-sized balanced subset is selected.
+      2. The selected subset is re-shuffled.
+      3. It is divided into five NEW equal-sized folds.
+      4. Every fold receives the same number of No Event
+         and Pacemaker samples.
+
+    The original fold membership is intentionally NOT preserved.
+
+    This is preferable for very small data-size experiments because
+    otherwise some folds can be empty or contain only one class.
+    """
+
+    # --------------------------------------------------------
+    # Combine all five original development folds
+    # --------------------------------------------------------
+    development_df = pd.concat(
+        folds,
+        axis=0,
+        ignore_index=True,
+        sort=False,
+    )
+
+    development_df = development_df.copy()
+
+    development_df["_BINARY_LABEL"] = (
+        development_df[
+            LABEL_COLUMN
+        ].map(
+            normalize_binary_label
+        )
+    )
+
+    total_development_samples = len(
+        development_df
+    )
+
+    # --------------------------------------------------------
+    # Determine valid subset size
+    # --------------------------------------------------------
+    target_total = calculate_balanced_subset_size(
+        total_development_samples=(
+            total_development_samples
+        ),
+        percentage=percentage,
+        n_folds=N_FOLDS,
+    )
+
+    samples_per_label = (
+        target_total // 2
+    )
+
+    samples_per_label_per_fold = (
+        samples_per_label
+        // N_FOLDS
+    )
+
+    samples_per_fold = (
+        target_total
+        // N_FOLDS
+    )
+
+    # --------------------------------------------------------
+    # Separate labels
+    # --------------------------------------------------------
+    label_0_df = (
+        development_df.loc[
+            development_df[
+                "_BINARY_LABEL"
+            ]
+            == 0
+        ]
+        .copy()
+    )
+
+    label_1_df = (
+        development_df.loc[
+            development_df[
+                "_BINARY_LABEL"
+            ]
+            == 1
+        ]
+        .copy()
+    )
+
+    available_per_label = min(
+        len(label_0_df),
+        len(label_1_df),
+    )
+
+    if samples_per_label > available_per_label:
+        raise ValueError(
+            f"{dataset_name} {percentage}%: "
+            f"need {samples_per_label} samples per label, "
+            f"but only {available_per_label} are available."
+        )
+
+    # --------------------------------------------------------
+    # Sample equal numbers from the two labels
+    # --------------------------------------------------------
+    sampled_label_0 = (
+        label_0_df.sample(
+            n=samples_per_label,
+            replace=False,
+            random_state=(
+                random_seed
+                + percentage * 100
+                + 1
+            ),
+        )
+        .reset_index(drop=True)
+    )
+
+    sampled_label_1 = (
+        label_1_df.sample(
+            n=samples_per_label,
+            replace=False,
+            random_state=(
+                random_seed
+                + percentage * 100
+                + 2
+            ),
+        )
+        .reset_index(drop=True)
+    )
+
+    # --------------------------------------------------------
+    # Shuffle each class independently
+    # --------------------------------------------------------
+    sampled_label_0 = (
+        sampled_label_0.sample(
+            frac=1.0,
+            random_state=(
+                random_seed
+                + percentage * 1000
+                + 10
+            ),
+        )
+        .reset_index(drop=True)
+    )
+
+    sampled_label_1 = (
+        sampled_label_1.sample(
+            frac=1.0,
+            random_state=(
+                random_seed
+                + percentage * 1000
+                + 20
+            ),
+        )
+        .reset_index(drop=True)
+    )
+
+    # --------------------------------------------------------
+    # Build five equal folds
+    #
+    # Every fold receives exactly:
+    #
+    #   samples_per_label_per_fold No Event
+    #   samples_per_label_per_fold Pacemaker
+    #
+    # --------------------------------------------------------
+    percentage_folds = []
+
+    for fold_index in range(
+        N_FOLDS
+    ):
+        start = (
+            fold_index
+            * samples_per_label_per_fold
+        )
+
+        end = (
+            start
+            + samples_per_label_per_fold
+        )
+
+        fold_label_0 = (
+            sampled_label_0.iloc[
+                start:end
+            ]
+            .copy()
+        )
+
+        fold_label_1 = (
+            sampled_label_1.iloc[
+                start:end
+            ]
+            .copy()
+        )
+
+        fold_df = pd.concat(
+            [
+                fold_label_0,
+                fold_label_1,
+            ],
+            axis=0,
+            ignore_index=True,
+        )
+
+        # Shuffle row order inside the fold.
+        fold_df = (
+            fold_df.sample(
+                frac=1.0,
+                random_state=(
+                    random_seed
+                    + percentage * 10000
+                    + fold_index
+                ),
+            )
+            .drop(
+                columns=[
+                    "_BINARY_LABEL",
+                ]
+            )
+            .reset_index(drop=True)
+        )
+
+        percentage_folds.append(
+            fold_df
+        )
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
+    fold_sizes = [
+        len(fold)
+        for fold in percentage_folds
+    ]
+
+    if len(
+        set(fold_sizes)
+    ) != 1:
+        raise AssertionError(
+            f"{dataset_name} {percentage}%: "
+            f"fold sizes are not equal: {fold_sizes}"
+        )
+
+    for fold_number, fold_df in enumerate(
+        percentage_folds,
+        start=1,
+    ):
+        fold_labels = (
+            fold_df[
+                LABEL_COLUMN
+            ]
+            .map(
+                normalize_binary_label
+            )
+        )
+
+        label_counts = (
+            fold_labels
+            .value_counts()
+            .to_dict()
+        )
+
+        count_0 = int(
+            label_counts.get(
+                0,
+                0,
+            )
+        )
+
+        count_1 = int(
+            label_counts.get(
+                1,
+                0,
+            )
+        )
+
+        if count_0 != count_1:
+            raise AssertionError(
+                f"{dataset_name} {percentage}% "
+                f"fold{fold_number} is not balanced: "
+                f"No Event={count_0}, "
+                f"Pacemaker={count_1}"
+            )
+
+    actual_total = sum(
+        fold_sizes
+    )
+
+    actual_percentage = (
+        actual_total
+        / total_development_samples
+        * 100.0
+    )
+
+    print()
+    print("=" * 70)
+    print(
+        f"{dataset_name} — "
+        f"{percentage}% DATA-SIZE DATASET"
+    )
+    print("=" * 70)
+
+    print(
+        f"Original development samples: "
+        f"{total_development_samples}"
+    )
+
+    print(
+        f"Requested percentage:          "
+        f"{percentage}%"
+    )
+
+    print(
+        f"Selected samples:              "
+        f"{actual_total}"
+    )
+
+    print(
+        f"Actual percentage:             "
+        f"{actual_percentage:.2f}%"
+    )
+
+    print(
+        f"No Event samples:              "
+        f"{samples_per_label}"
+    )
+
+    print(
+        f"Pacemaker samples:             "
+        f"{samples_per_label}"
+    )
+
+    print(
+        f"Samples per fold:              "
+        f"{samples_per_fold}"
+    )
+
+    print(
+        f"No Event per fold:             "
+        f"{samples_per_label_per_fold}"
+    )
+
+    print(
+        f"Pacemaker per fold:            "
+        f"{samples_per_label_per_fold}"
+    )
+
+    print(
+        f"Fold sizes:                    "
+        f"{fold_sizes}"
+    )
+
+    return percentage_folds
+
+def verify_balanced_labels(
+    folds,
+    dataset_name,
+    percentage,
+):
+    """
+    Verify that the union of the five percentage folds contains
+    exactly the same number of samples for both labels.
+    """
+    combined = pd.concat(
+        folds,
+        axis=0,
+        ignore_index=True,
+    )
+
+    labels = (
+        combined[LABEL_COLUMN]
+        .map(normalize_binary_label)
+    )
+
+    counts = labels.value_counts().to_dict()
+
+    count_0 = int(
+        counts.get(0, 0)
+    )
+
+    count_1 = int(
+        counts.get(1, 0)
+    )
+
+    if count_0 != count_1:
+        raise AssertionError(
+            f"{dataset_name} {percentage}% is not label-balanced: "
+            f"No Event={count_0}, Pacemaker={count_1}"
+        )
+
+    print(
+        f"{dataset_name} {percentage}% balance verified: "
+        f"{count_0} No Event + {count_1} Pacemaker."
+    )
+
+
+def verify_percentage_subset_of_original_folds(
+    percentage_folds,
+    original_folds,
+    dataset_name,
+    percentage,
+):
+    """
+    Verify that every sample in each percentage fold comes from
+    the corresponding original fold.
+
+    Validation is performed using normalized patient IDs rather than
+    whole-row string comparison. This avoids false mismatches caused
+    by pandas dtype changes such as 123 vs 123.0.
+    """
+
+    for fold_number in range(N_FOLDS):
+
+        percentage_fold = percentage_folds[
+            fold_number
+        ]
+
+        original_fold = original_folds[
+            fold_number
+        ]
+
+        # Empty percentage folds are valid for very small percentages.
+        if len(percentage_fold) == 0:
+            print(
+                f"{dataset_name} {percentage}% fold{fold_number + 1}: "
+                "empty — valid."
+            )
+            continue
+
+        percentage_id_column = find_id_column(
+            percentage_fold,
+            ID_COLUMN,
+        )
+
+        original_id_column = find_id_column(
+            original_fold,
+            ID_COLUMN,
+        )
+
+        percentage_ids = set(
+            percentage_fold[
+                percentage_id_column
+            ]
+            .map(normalize_identifier)
+            .dropna()
+            .tolist()
+        )
+
+        original_ids = set(
+            original_fold[
+                original_id_column
+            ]
+            .map(normalize_identifier)
+            .dropna()
+            .tolist()
+        )
+
+        invalid_ids = sorted(
+            percentage_ids
+            - original_ids
+        )
+
+        if invalid_ids:
+            raise AssertionError(
+                f"{dataset_name} {percentage}% fold"
+                f"{fold_number + 1} contains IDs not present "
+                f"in the corresponding original fold.\n"
+                f"Invalid IDs: {invalid_ids[:20]}"
+            )
+
+        # Also make sure IDs were not somehow duplicated.
+        normalized_percentage_ids = (
+            percentage_fold[
+                percentage_id_column
+            ]
+            .map(normalize_identifier)
+            .dropna()
+        )
+
+        duplicate_mask = (
+            normalized_percentage_ids
+            .duplicated(keep=False)
+        )
+
+        if duplicate_mask.any():
+            duplicate_ids = (
+                normalized_percentage_ids[
+                    duplicate_mask
+                ]
+                .drop_duplicates()
+                .tolist()
+            )
+
+            raise AssertionError(
+                f"{dataset_name} {percentage}% fold"
+                f"{fold_number + 1} contains duplicate IDs:\n"
+                f"{duplicate_ids[:20]}"
+            )
+
+        print(
+            f"{dataset_name} {percentage}% fold{fold_number + 1}: "
+            f"{len(percentage_fold)} samples verified."
+        )
+
+    print(
+        f"{dataset_name} {percentage}%: "
+        "all selected samples belong to their original folds."
+    )
+
+def save_data_size_split_collection(
+    output_directory,
+    test_df,
+    folds,
+):
+    """
+    Save the percentage-specific folds together with the SAME
+    original fixed test.xlsx.
+    """
+    output_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # Same fixed test set for every percentage.
+    test_df.to_excel(
+        output_directory
+        / "test.xlsx",
+        index=False,
+    )
+
+    for fold_number, fold_df in enumerate(
+        folds,
+        start=1,
+    ):
+        fold_df.to_excel(
+            output_directory
+            / f"fold{fold_number}.xlsx",
+            index=False,
+        )
+
+
+def create_all_data_size_experiment_datasets(
+    tum_test,
+    tum_folds,
+    lmu_test,
+    lmu_folds,
+):
+    """
+    Generate:
+
+        1%
+        2%
+        5%
+        10%
+        20%
+        50%
+
+    for TUM, LMU, and merged.
+
+    Guarantees:
+      - same original test set for every percentage;
+      - balanced LABEL distribution for TUM and LMU;
+      - merged test = TUM test + LMU test;
+      - merged foldX = TUM foldX + LMU foldX.
+    """
+    print()
+    print("=" * 80)
+    print("CREATING DATA-SIZE EXPERIMENT DATASETS")
+    print("=" * 80)
+
+    for percentage in DATA_SIZE_PERCENTAGES:
+
+        # ----------------------------------------------------
+        # TUM subset
+        # ----------------------------------------------------
+        tum_percentage_folds = (
+            sample_balanced_development_subset(
+                folds=tum_folds,
+                percentage=percentage,
+                random_seed=(
+                    RANDOM_SEED
+                ),
+                dataset_name="TUM",
+            )
+        )
+
+        # ----------------------------------------------------
+        # LMU subset
+        # ----------------------------------------------------
+        lmu_percentage_folds = (
+            sample_balanced_development_subset(
+                folds=lmu_folds,
+                percentage=percentage,
+                random_seed=(
+                    RANDOM_SEED + 1
+                ),
+                dataset_name="LMU",
+            )
+        )
+
+        verify_balanced_labels(
+            folds=tum_percentage_folds,
+            dataset_name="TUM",
+            percentage=percentage,
+        )
+
+        verify_balanced_labels(
+            folds=lmu_percentage_folds,
+            dataset_name="LMU",
+            percentage=percentage,
+        )
+
+        # ----------------------------------------------------
+        # Merged subset
+        #
+        # IMPORTANT:
+        # merged foldX = TUM foldX + LMU foldX
+        # ----------------------------------------------------
+        merged_percentage_folds = []
+
+        for fold_index in range(
+            N_FOLDS
+        ):
+            merged_fold = pd.concat(
+                [
+                    tum_percentage_folds[
+                        fold_index
+                    ],
+                    lmu_percentage_folds[
+                        fold_index
+                    ],
+                ],
+                axis=0,
+                ignore_index=True,
+                sort=False,
+            )
+
+            merged_percentage_folds.append(
+                merged_fold
+            )
+
+        # Same fixed merged test set used for every percentage.
+        merged_test = pd.concat(
+            [
+                tum_test,
+                lmu_test,
+            ],
+            axis=0,
+            ignore_index=True,
+            sort=False,
+        )
+
+        # ----------------------------------------------------
+        # Verify merged folds
+        # ----------------------------------------------------
+        for fold_index in range(
+            N_FOLDS
+        ):
+            verify_merged_split(
+                tum_df=(
+                    tum_percentage_folds[
+                        fold_index
+                    ]
+                ),
+                lmu_df=(
+                    lmu_percentage_folds[
+                        fold_index
+                    ]
+                ),
+                merged_df=(
+                    merged_percentage_folds[
+                        fold_index
+                    ]
+                ),
+                split_name=(
+                    f"{percentage}% merged "
+                    f"fold{fold_index + 1}"
+                ),
+            )
+
+        verify_merged_split(
+            tum_df=tum_test,
+            lmu_df=lmu_test,
+            merged_df=merged_test,
+            split_name=(
+                f"{percentage}% merged test"
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Output paths
+        # ----------------------------------------------------
+        percentage_root = (
+            DATA_SIZE_OUTPUT_ROOT
+            / f"{percentage}_percent"
+        )
+
+        # TUM
+        save_data_size_split_collection(
+            output_directory=(
+                percentage_root
+                / "tum"
+            ),
+            test_df=tum_test,
+            folds=tum_percentage_folds,
+        )
+
+        # LMU
+        save_data_size_split_collection(
+            output_directory=(
+                percentage_root
+                / "lmu"
+            ),
+            test_df=lmu_test,
+            folds=lmu_percentage_folds,
+        )
+
+        # MERGED
+        save_data_size_split_collection(
+            output_directory=(
+                percentage_root
+                / "merged"
+            ),
+            test_df=merged_test,
+            folds=merged_percentage_folds,
+        )
+
+        print()
+        print(
+            f"{percentage}% datasets saved under:"
+        )
+        print(
+            percentage_root
+        )
+
 
 # ============================================================
 # REPORTING
@@ -1843,6 +2731,16 @@ def main():
         ),
         test_df=merged_test,
         folds=merged_folds,
+    )
+
+    # --------------------------------------------------------
+    # 12b. Create data-size experiment datasets
+    # --------------------------------------------------------
+    create_all_data_size_experiment_datasets(
+        tum_test=tum_test,
+        tum_folds=tum_folds,
+        lmu_test=lmu_test,
+        lmu_folds=lmu_folds,
     )
 
     # --------------------------------------------------------
