@@ -1,9 +1,9 @@
 {
   "dataset_root": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits",
 
-  "train_dataset": "merged",
+  "train_dataset": "lmu",
   "test_dataset": "merged",
-  "data_percentage": 50,
+  "data_percentage": 100,
 
   "pretrained": {
     "checkpoint_dir": "/home/ubuntu/TAVI_new/Tabular/tabpfn/results/merged_final",
@@ -13,7 +13,7 @@
   "id_col": "ID",
   "label_col": "LABEL",
 
-  "output_dir": "results/merged_merged",
+  "output_dir": "results/lmu_merged",
 
   "n_folds": 5,
   "random_seed": 42,
@@ -34,7 +34,7 @@
   },
 
   "feature_importance": {
-    "enabled": true,
+    "enabled": false,
     "n_repeats": 5,
     "metadata_path": "/home/ubuntu/TAVI_new/dataset/new_features_table.xlsx"
   }

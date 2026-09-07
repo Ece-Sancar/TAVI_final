@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Dataset utilities for the combined CT + tabular model.
+Dataset utilities for the combined RadioDINO CT + tabular model.
 
 Experimental protocol
 ---------------------
@@ -29,7 +29,9 @@ Missing values:
 Scaling:
     StandardScaler fitted ONLY on the four training folds.
 
-No artificial __missing features are created.
+Missingness is represented internally by one binary mask value per original
+feature. These masks are appended to the MLP input but are not exposed as
+separate clinical feature names and are not reported as separate features.
 
 No additional class balancing/downsampling is performed.
 The predefined Excel files determine the patients used in each split.
@@ -525,6 +527,7 @@ class Valve2DDataModule(
         self.class_weights = None
 
         self.tabular_columns = None
+        self.model_input_dim = None
         self.preprocessing_state = None
 
     # =========================================================================
@@ -810,86 +813,72 @@ class Valve2DDataModule(
         np.ndarray,
     ]:
         """
-        Fit median imputation + StandardScaler using ONLY training data.
+        Fit preprocessing using ONLY the four training folds.
 
-        No missing-indicator features are created.
+        For every original clinical feature:
+          1. missing values are imputed with the training-fold median;
+          2. the imputed value is standardized with a StandardScaler fitted
+             only on the training folds;
+          3. a binary missingness mask is appended internally to the MLP input.
+
+        The mask columns are NOT exposed as separate feature names. Therefore
+        feature-importance outputs still contain only the original Excel
+        feature names.
         """
-        train = raw_train[
-            list(columns)
-        ].copy()
+        columns = list(columns)
+        train = raw_train[columns].copy()
+
+        # Missingness is measured BEFORE imputation.
+        missing_mask = (
+            train.isna()
+            .astype(np.float32)
+            .to_numpy()
+        )
 
         medians = (
-            train.median(
-                axis=0,
-                skipna=True,
-            )
+            train.median(axis=0, skipna=True)
             .fillna(0.0)
         )
 
-        imputed_train = (
-            train.fillna(
-                medians
-            )
-        )
+        imputed_train = train.fillna(medians)
 
         scaler = StandardScaler()
+        scaler.fit(imputed_train)
 
-        scaler.fit(
-            imputed_train
+        standardized_values = (
+            scaler.transform(imputed_train)
+            .astype(np.float32)
         )
 
-        transformed_train = (
-            scaler.transform(
-                imputed_train
-            )
-            .astype(
-                np.float32
-            )
-        )
+        # Internal MLP input: [standardized values | missingness masks].
+        transformed_train = np.concatenate(
+            [standardized_values, missing_mask],
+            axis=1,
+        ).astype(np.float32)
 
-        if not np.isfinite(
-            transformed_train
-        ).all():
+        if not np.isfinite(transformed_train).all():
             raise FloatingPointError(
-                "Non-finite values remain "
-                "after train preprocessing."
+                "Non-finite values remain after train preprocessing."
             )
 
         state = {
-            "original_columns": list(
-                columns
-            ),
-            "output_columns": list(
-                columns
-            ),
+            "original_columns": columns,
             "medians": {
                 key: float(value)
-                for key, value
-                in medians.items()
+                for key, value in medians.items()
             },
-            "scaler_mean": (
-                scaler.mean_
-                .astype(float)
-                .tolist()
-            ),
-            "scaler_scale": (
-                scaler.scale_
-                .astype(float)
-                .tolist()
-            ),
-            "missing_imputation": (
-                "training-set median"
-            ),
-            "scaler_fit": (
-                "training folds only"
-            ),
-            "missing_indicators": False,
+            "scaler_mean": scaler.mean_.astype(float).tolist(),
+            "scaler_scale": scaler.scale_.astype(float).tolist(),
+            "missing_imputation": "training-set median",
+            "scaler_fit": "training folds only",
+            "missingness_mask": True,
+            "value_feature_count": len(columns),
+            "mask_feature_count": len(columns),
+            "model_input_dim": 2 * len(columns),
+            "reported_feature_names": columns,
         }
 
-        return (
-            state,
-            transformed_train,
-        )
+        return state, transformed_train
 
     @staticmethod
     def transform_tabular(
@@ -897,71 +886,53 @@ class Valve2DDataModule(
         preprocessing_state: Dict,
     ) -> np.ndarray:
         """
-        Apply saved training preprocessing.
+        Apply one fold's training-only preprocessing.
+
+        The returned tensor contains standardized imputed values followed by
+        binary missingness masks. The original raw feature names remain the
+        only reported clinical features.
         """
-        columns = list(
-            preprocessing_state[
-                "original_columns"
-            ]
+        columns = list(preprocessing_state["original_columns"])
+
+        aligned = raw_data.reindex(columns=columns).copy()
+
+        missing_mask = (
+            aligned.isna()
+            .astype(np.float32)
+            .to_numpy()
         )
 
-        aligned = raw_data.reindex(
-            columns=columns
-        ).copy()
-
         medians = pd.Series(
-            preprocessing_state[
-                "medians"
-            ],
+            preprocessing_state["medians"],
             index=columns,
             dtype=np.float64,
         )
 
-        imputed = aligned.fillna(
-            medians
-        )
+        imputed = aligned.fillna(medians)
 
         scaler_mean = np.asarray(
-            preprocessing_state[
-                "scaler_mean"
-            ],
+            preprocessing_state["scaler_mean"],
             dtype=np.float64,
         )
-
         scaler_scale = np.asarray(
-            preprocessing_state[
-                "scaler_scale"
-            ],
+            preprocessing_state["scaler_scale"],
             dtype=np.float64,
         )
+        scaler_scale = np.where(scaler_scale == 0, 1.0, scaler_scale)
 
-        # StandardScaler uses scale=1 for
-        # effectively constant features,
-        # but keep this guard anyway.
-        scaler_scale = np.where(
-            scaler_scale == 0,
-            1.0,
-            scaler_scale,
-        )
-
-        transformed = (
-            (
-                imputed.to_numpy(
-                    dtype=np.float64
-                )
-                - scaler_mean
-            )
+        standardized_values = (
+            (imputed.to_numpy(dtype=np.float64) - scaler_mean)
             / scaler_scale
-        ).astype(
-            np.float32
-        )
+        ).astype(np.float32)
 
-        if not np.isfinite(
-            transformed
-        ).all():
+        transformed = np.concatenate(
+            [standardized_values, missing_mask],
+            axis=1,
+        ).astype(np.float32)
+
+        if not np.isfinite(transformed).all():
             raise FloatingPointError(
-                "Non-finite values remain "
-                "after preprocessing."
+                "Non-finite values remain after preprocessing."
             )
 
         return transformed
@@ -1046,9 +1017,9 @@ class Valve2DDataModule(
             preprocessing_state
         )
 
-        self.tabular_columns = list(
-            train_columns
-        )
+        # Only original Excel features are exposed as clinical feature names.
+        self.tabular_columns = list(train_columns)
+        self.model_input_dim = int(preprocessing_state["model_input_dim"])
 
         train_labels = np.asarray(
             [
@@ -1332,8 +1303,11 @@ class Valve2DDataModule(
         )
 
         print(
-            f"Features:   "
-            f"{len(train_columns)}"
+            f"Clinical features:  {len(train_columns)}"
+        )
+        print(
+            f"MLP input width:    {self.model_input_dim} "
+            f"({len(train_columns)} values + {len(train_columns)} masks)"
         )
 
         print(

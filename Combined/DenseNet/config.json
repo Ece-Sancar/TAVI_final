@@ -1,0 +1,84 @@
+{
+  "dataset_root": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits",
+  "data_root": "/home/ubuntu/final_dataset",
+  "checkpoint_dir": "checkpoints/merged_lmu",
+  "output_dir": "results/merged_lmu",
+  "train_dataset": "pre",
+  "test_dataset": "lmu",
+  "data_percentage": 100,
+  "max_epochs": 5000,
+  "pretrained": {
+    "checkpoint_dir": "/home/ubuntu/TAVI_final/Combined/DenseNet/checkpoints/merged_merged4/100_percent",
+    "output_dir": "/home/ubuntu/TAVI_final/Combined/DenseNet/results/merged_merged4/100_percent",
+    "train_dataset": "merged",
+    "data_percentage": 100
+  },
+  "img_size": 448,
+  "image_mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "image_std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "weight_decay": 0.001,
+  "label_smoothing": 0.0,
+  "warmup_epochs": 5,
+  "min_lr_factor": 0.01,
+  "use_swa": false,
+  "swa_lr": 8e-05,
+  "swa_epoch_start": 0.75,
+  "freeze_bn": true,
+  "unfreeze_epoch": 50,
+  "unfreeze_last_n_blocks": 2,
+  "backbone_lr_multiplier": 0.03,
+  "batch_size": 16,
+  "learning_rate": 0.00012,
+  "patience": 75,
+  "accumulate_grad_batches": 2,
+  "seed": 42,
+  "n_folds": 5,
+  "checkpoint_metric": "val_auroc",
+  "checkpoint_mode": "max",
+  "early_stopping_metric": "val_auroc",
+  "early_stopping_mode": "max",
+  "early_stopping_min_delta": 0.001,
+  "use_wandb": true,
+  "wandb_project": "Final_Combined",
+  "run_name": "merged4",
+  "num_gpus": 1,
+  "num_workers": 8,
+  "config_file": "config.json",
+  "dropout_rate_image": 0.3,
+  "dropout_rate_tabular": 0.25,
+  "feature_importance": {
+    "enabled": false,
+    "n_repeats": 5,
+    "top_k": 15,
+    "metadata_path": "/home/ubuntu/TAVI_new/dataset/new_features_table.xlsx"
+  },
+  "gradcam": {
+    "enabled": false,
+    "save_per_fold": true,
+    "save_ensemble_average": true
+  },
+  "resolved": {
+    "mode": "train",
+    "train_dataset": "merged",
+    "test_dataset": "merged",
+    "data_percentage": 100,
+    "training_folder": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged",
+    "test_file": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/test.xlsx",
+    "fold_files": [
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold1.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold2.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold3.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold4.xlsx",
+      "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold5.xlsx"
+    ],
+    "test_policy": "Only the fixed original test_dataset/test.xlsx is used for final testing."
+  }
+}

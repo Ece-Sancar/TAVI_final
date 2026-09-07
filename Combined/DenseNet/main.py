@@ -13,7 +13,7 @@ Features
 ✓ TUM / LMU / merged testing
 ✓ 2 / 5 / 10 / 20 / 50 / 100 percent training data
 ✓ checkpoint-only ("pre") mode
-✓ validation-derived threshold per fold
+✓ fixed 0.5 decision threshold for every fold and ensemble
 ✓ five-fold independent-test mean ± std
 ✓ five-model probability ensemble
 ✓ ensemble threshold fixed at 0.5
@@ -566,11 +566,7 @@ def find_existing_checkpoint(
     )
 
     preferred = [
-        fold_folder
-        / "best-checkpoint-calibrated.ckpt",
-
-        fold_folder
-        / "best-checkpoint.ckpt",
+        fold_folder / "best-checkpoint.ckpt",
     ]
 
     for path in preferred:
@@ -595,37 +591,6 @@ def find_existing_checkpoint(
         )
 
     return candidates[0]
-
-
-def add_threshold_to_checkpoint(
-    source_path,
-    destination_path,
-    threshold,
-):
-    checkpoint = torch.load(
-        source_path,
-        map_location="cpu",
-    )
-
-    checkpoint[
-        "decision_threshold"
-    ] = float(
-        threshold
-    )
-
-    checkpoint.setdefault(
-        "hyper_parameters",
-        {},
-    )[
-        "decision_threshold"
-    ] = float(
-        threshold
-    )
-
-    torch.save(
-        checkpoint,
-        destination_path,
-    )
 
 
 # =============================================================================
@@ -708,86 +673,6 @@ def collect_predictions(
             dtype=np.int64,
         ),
         sample_ids,
-    )
-
-
-def choose_threshold(
-    targets,
-    probabilities,
-    metric="balanced_accuracy",
-):
-    candidates = np.linspace(
-        0.10,
-        0.90,
-        161,
-    )
-
-    best_threshold = 0.5
-    best_score = -np.inf
-
-    for threshold in candidates:
-        predictions = (
-            probabilities
-            >= threshold
-        ).astype(int)
-
-        if metric == "accuracy":
-            score = accuracy_score(
-                targets,
-                predictions,
-            )
-
-        elif metric == "f1":
-            score = f1_score(
-                targets,
-                predictions,
-                zero_division=0,
-            )
-
-        else:
-            score = (
-                balanced_accuracy_score(
-                    targets,
-                    predictions,
-                )
-            )
-
-        if (
-            score
-            > best_score
-            + 1e-12
-        ):
-            best_score = float(
-                score
-            )
-
-            best_threshold = float(
-                threshold
-            )
-
-        elif (
-            abs(
-                score
-                - best_score
-            )
-            <= 1e-12
-        ):
-            if (
-                abs(
-                    threshold - 0.5
-                )
-                < abs(
-                    best_threshold
-                    - 0.5
-                )
-            ):
-                best_threshold = float(
-                    threshold
-                )
-
-    return (
-        best_threshold,
-        best_score,
     )
 
 
@@ -1167,6 +1052,94 @@ def save_evaluation(
 
 
 # =============================================================================
+# PATIENT-LEVEL MODALITY IMPORTANCE
+# =============================================================================
+
+@torch.inference_mode()
+def calculate_modality_importance_percentages(
+    model,
+    data_loader,
+    device,
+):
+    """
+    Calculate image-vs-tabular contribution percentages for every patient.
+
+    The final fusion classifier is linear after concatenating the image and
+    tabular embeddings. Therefore the binary class logit margin can be exactly
+    decomposed into an image-branch contribution and a tabular-branch
+    contribution (plus the classifier bias).
+
+    We report relative absolute branch contributions, excluding the shared
+    bias:
+
+        image_pct   = |image contribution| / (|image| + |tabular|) * 100
+        tabular_pct = |tabular contribution| / (|image| + |tabular|) * 100
+
+    These two percentages sum to 100 for each patient and fold.
+    """
+    model = model.to(device)
+    model.eval()
+
+    linear_layer = model.classifier[-1]
+    if not isinstance(linear_layer, torch.nn.Linear):
+        raise TypeError(
+            "Expected the final combined classifier layer to be nn.Linear."
+        )
+
+    # Difference between pacemaker and no-event classifier weights.
+    margin_weights = (
+        linear_layer.weight[1] - linear_layer.weight[0]
+    )
+
+    image_percentages = []
+    tabular_percentages = []
+    sample_ids = []
+
+    for images, _, tabular, batch_ids in data_loader:
+        images = images.to(device, non_blocking=True)
+        tabular = tabular.to(device, non_blocking=True)
+
+        image_features = model.extract_image_features(images)
+        tabular_features = model.extract_tabular_features(tabular)
+
+        image_dim = image_features.shape[1]
+        tabular_dim = tabular_features.shape[1]
+
+        if margin_weights.numel() != image_dim + tabular_dim:
+            raise RuntimeError(
+                "Fusion classifier width does not match image + tabular embeddings."
+            )
+
+        image_weights = margin_weights[:image_dim]
+        tabular_weights = margin_weights[image_dim:]
+
+        image_contribution = image_features @ image_weights
+        tabular_contribution = tabular_features @ tabular_weights
+
+        image_abs = torch.abs(image_contribution)
+        tabular_abs = torch.abs(tabular_contribution)
+        denominator = image_abs + tabular_abs
+
+        # If both branch contributions are numerically zero, assign 50/50.
+        image_pct = torch.where(
+            denominator > 1e-12,
+            100.0 * image_abs / denominator,
+            torch.full_like(denominator, 50.0),
+        )
+        tabular_pct = 100.0 - image_pct
+
+        image_percentages.extend(image_pct.cpu().numpy().tolist())
+        tabular_percentages.extend(tabular_pct.cpu().numpy().tolist())
+        sample_ids.extend([str(value) for value in batch_ids])
+
+    return (
+        np.asarray(image_percentages, dtype=np.float64),
+        np.asarray(tabular_percentages, dtype=np.float64),
+        sample_ids,
+    )
+
+
+# =============================================================================
 # FEATURE METADATA
 # =============================================================================
 
@@ -1311,9 +1284,16 @@ def calculate_permutation_importance(
         .copy()
     )
 
-    number_of_features = (
-        original_features.shape[1]
-    )
+    total_model_input_features = original_features.shape[1]
+    number_of_features = len(test_dataset.tabular_columns)
+
+    if total_model_input_features != 2 * number_of_features:
+        raise RuntimeError(
+            "Expected tabular model input to contain standardized values "
+            "followed by one missingness mask per original feature. "
+            f"Got width={total_model_input_features}, "
+            f"original_features={number_of_features}."
+        )
 
     mean_deltas = np.zeros(
         number_of_features,
@@ -1364,13 +1344,18 @@ def calculate_permutation_importance(
                     len(permuted_features)
                 )
 
-                permuted_features[
-                    :,
-                    feature_index,
-                ] = original_features[
-                    permutation,
-                    feature_index,
-                ]
+                # Permute the standardized value AND its corresponding
+                # missingness mask together. This reports one importance for
+                # the original clinical feature rather than separate mask
+                # variables.
+                mask_index = number_of_features + feature_index
+
+                permuted_features[:, feature_index] = (
+                    original_features[permutation, feature_index]
+                )
+                permuted_features[:, mask_index] = (
+                    original_features[permutation, mask_index]
+                )
 
                 # This now works because the importance
                 # DataLoader uses num_workers=0.
@@ -2350,13 +2335,6 @@ def main(
         )
     )
 
-    threshold_metric = str(
-        config.get(
-            "threshold_metric",
-            "balanced_accuracy",
-        )
-    )
-
     # ---------------------------------------------------------
     # Feature importance
     # ---------------------------------------------------------
@@ -2578,6 +2556,9 @@ def main(
     fold_probabilities = []
 
     raw_fold_importances = []
+
+    fold_image_importance_percentages = []
+    fold_tabular_importance_percentages = []
 
     reference_test_ids = None
     reference_test_targets = None
@@ -2940,9 +2921,8 @@ def main(
                         ]
                     ),
 
-                    tabular_in=len(
-                        data_module
-                        .tabular_columns
+                    tabular_in=int(
+                        data_module.model_input_dim
                     ),
                 )
             )
@@ -3188,9 +3168,8 @@ def main(
                 .tabular_in
             )
 
-            actual_tabular_width = len(
-                data_module
-                .tabular_columns
+            actual_tabular_width = int(
+                data_module.model_input_dim
             )
 
             if (
@@ -3213,8 +3192,13 @@ def main(
         )
 
         # =====================================================
-        # VALIDATION THRESHOLD
+        # VALIDATION EVALUATION — FIXED THRESHOLD 0.5
         # =====================================================
+
+        # The same fixed threshold is used for validation, every fold test,
+        # and the five-model ensemble. No threshold is fitted/calibrated.
+        threshold = 0.5
+        best_model.decision_threshold = 0.5
 
         (
             val_probabilities,
@@ -3222,92 +3206,28 @@ def main(
             val_ids,
         ) = collect_predictions(
             best_model,
-            data_module
-            .val_dataloader(),
+            data_module.val_dataloader(),
             device,
         )
 
-        (
-            threshold,
-            threshold_score,
-        ) = choose_threshold(
-            val_targets,
-            val_probabilities,
-            metric=(
-                threshold_metric
-            ),
+        validation_metrics, _ = save_evaluation(
+            targets=val_targets,
+            probabilities=val_probabilities,
+            sample_ids=val_ids,
+            threshold=0.5,
+            output_dir=fold_output_dir,
+            phase="validation",
+            fold=fold_number,
         )
 
-        best_model.decision_threshold = (
-            threshold
-        )
-
-        validation_metrics, _ = (
-            save_evaluation(
-                targets=(
-                    val_targets
-                ),
-                probabilities=(
-                    val_probabilities
-                ),
-                sample_ids=(
-                    val_ids
-                ),
-                threshold=(
-                    threshold
-                ),
-                output_dir=(
-                    fold_output_dir
-                ),
-                phase=(
-                    "validation_calibrated"
-                ),
-                fold=(
-                    fold_number
-                ),
-            )
-        )
-
-        # Save threshold info.
         save_json(
             {
-                "threshold": (
-                    threshold
-                ),
-                "selection_metric": (
-                    threshold_metric
-                ),
-                "validation_selection_score": (
-                    threshold_score
-                ),
-                "checkpoint": str(
-                    best_path
-                ),
+                "threshold": 0.5,
+                "policy": "Fixed threshold; no calibration or optimization.",
+                "checkpoint": str(best_path),
             },
-            fold_output_dir
-            / "decision_threshold.json",
+            fold_output_dir / "decision_threshold.json",
         )
-
-        if (
-            resolved["mode"]
-            == "train"
-        ):
-            calibrated_checkpoint = (
-                resolved[
-                    "checkpoint_root"
-                ]
-                / f"fold{fold_number}"
-                / (
-                    "best-checkpoint-"
-                    "calibrated.ckpt"
-                )
-            )
-
-            add_threshold_to_checkpoint(
-                best_path,
-                calibrated_checkpoint,
-                threshold,
-            )
 
         # =====================================================
         # FIXED INDEPENDENT TEST
@@ -3346,83 +3266,57 @@ def main(
             test_metrics,
             test_frame,
         ) = save_evaluation(
-            targets=(
-                test_targets
-            ),
-            probabilities=(
-                test_probabilities
-            ),
-            sample_ids=(
-                test_ids
-            ),
-            threshold=(
-                threshold
-            ),
-            output_dir=(
-                fold_output_dir
-            ),
-            phase=(
-                "test_calibrated"
-            ),
-            fold=(
-                fold_number
-            ),
-        )
-
-        # Also preserve threshold 0.5 result.
-        (
-            test_default_metrics,
-            _,
-        ) = save_evaluation(
-            targets=(
-                test_targets
-            ),
-            probabilities=(
-                test_probabilities
-            ),
-            sample_ids=(
-                test_ids
-            ),
+            targets=test_targets,
+            probabilities=test_probabilities,
+            sample_ids=test_ids,
             threshold=0.5,
-            output_dir=(
-                fold_output_dir
-            ),
-            phase=(
-                "test_default_0_5"
-            ),
-            fold=(
-                fold_number
-            ),
+            output_dir=fold_output_dir,
+            phase="test",
+            fold=fold_number,
         )
 
         fold_probabilities.append(
             test_probabilities
         )
 
+        # =====================================================
+        # PATIENT-LEVEL IMAGE VS TABULAR IMPORTANCE
+        # =====================================================
+        (
+            image_importance_pct,
+            tabular_importance_pct,
+            modality_ids,
+        ) = calculate_modality_importance_percentages(
+            best_model,
+            data_module.test_dataloader(),
+            device,
+        )
+
+        if modality_ids != reference_test_ids:
+            raise RuntimeError(
+                "Sample order changed during modality-importance calculation."
+            )
+
+        fold_image_importance_percentages.append(image_importance_pct)
+        fold_tabular_importance_percentages.append(tabular_importance_pct)
+
+        pd.DataFrame(
+            {
+                "ID": reference_test_ids,
+                "Image_Importance_Pct": image_importance_pct,
+                "Tabular_Importance_Pct": tabular_importance_pct,
+            }
+        ).to_excel(
+            fold_output_dir / "modality_importance_per_patient.xlsx",
+            index=False,
+        )
+
         fold_result = {
-            "fold": (
-                fold_number
-            ),
-
-            "threshold": (
-                threshold
-            ),
-
-            "validation_metrics": (
-                validation_metrics
-            ),
-
-            "test_metrics": (
-                test_metrics
-            ),
-
-            "test_default_0_5": (
-                test_default_metrics
-            ),
-
-            "best_checkpoint": str(
-                best_path
-            ),
+            "fold": fold_number,
+            "threshold": 0.5,
+            "validation_metrics": validation_metrics,
+            "test_metrics": test_metrics,
+            "best_checkpoint": str(best_path),
         }
 
         fold_results.append(
@@ -3635,9 +3529,7 @@ def main(
                 probabilities=(
                     test_probabilities
                 ),
-                threshold=(
-                    threshold
-                ),
+                threshold=0.5,
                 output_root=(
                     gradcam_dir
                 ),
@@ -3665,9 +3557,7 @@ def main(
         if logger is not None:
             logger.experiment.log(
                 {
-                    "selected_threshold": (
-                        threshold
-                    ),
+                    "decision_threshold": 0.5,
 
                     **{
                         (
@@ -3809,6 +3699,51 @@ def main(
     ensemble_table.to_csv(
         output_dir
         / "ensemble_predictions.csv",
+        index=False,
+    )
+
+    # =========================================================
+    # PATIENT-LEVEL MODALITY IMPORTANCE EXCEL
+    # =========================================================
+    # The ensemble values are the arithmetic mean of the five fold-specific
+    # relative branch-importance percentages for each patient.
+    modality_table = pd.DataFrame(
+        {
+            "ID": reference_test_ids,
+            "true_label": reference_test_targets,
+        }
+    )
+
+    image_importance_matrix = np.stack(
+        fold_image_importance_percentages,
+        axis=0,
+    )
+    tabular_importance_matrix = np.stack(
+        fold_tabular_importance_percentages,
+        axis=0,
+    )
+
+    for fold_number in range(1, n_folds + 1):
+        modality_table[
+            f"Fold{fold_number}_Image_Importance_Pct"
+        ] = image_importance_matrix[fold_number - 1]
+        modality_table[
+            f"Fold{fold_number}_Tabular_Importance_Pct"
+        ] = tabular_importance_matrix[fold_number - 1]
+
+    modality_table["Ensemble_Image_Importance_Pct"] = (
+        image_importance_matrix.mean(axis=0)
+    )
+    modality_table["Ensemble_Tabular_Importance_Pct"] = (
+        tabular_importance_matrix.mean(axis=0)
+    )
+
+    # Helpful prediction context in the same workbook.
+    modality_table["Ensemble_Prob_Pacemaker"] = ensemble_probabilities
+    modality_table["Ensemble_Prediction"] = ensemble_predictions
+
+    modality_table.to_excel(
+        output_dir / "test_patient_modality_importance.xlsx",
         index=False,
     )
 

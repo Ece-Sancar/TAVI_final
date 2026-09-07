@@ -8,3 +8,13 @@ ECG.zip
 */lightning_logs/
 */gradcam/
 */results/
+*/wandb/
+*/old_results/
+__pycache__/
+checkpoints/
+lightning_logs/
+gradcam/
+results/
+wandb/
+old_results/
+
