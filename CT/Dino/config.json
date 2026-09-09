@@ -1,19 +1,19 @@
 {
   "dataset_root": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits",
   "data_root": "/home/ubuntu/final_dataset",
-  "checkpoint_dir": "checkpoints/merged_merged4",
-  "output_dir": "results/merged_merged4",
-  "train_dataset": "pre",
+  "checkpoint_dir": "checkpoints/merged_merged",
+  "output_dir": "results/merged_merged",
+  "train_dataset": "merged",
   "test_dataset": "merged",
   "data_percentage": 100,
   "max_epochs": 5000,
   "pretrained": {
-    "checkpoint_dir": "/home/ubuntu/TAVI_final/Combined/DenseNet/checkpoints/merged_merged4/100_percent",
-    "output_dir": "/home/ubuntu/TAVI_final/Combined/DenseNet/results/merged_merged4/100_percent",
+    "checkpoint_dir": "/home/ubuntu/TAVI_final/CT/Dino/checkpoints/merged_merged/100_percent",
+    "output_dir": "/home/ubuntu/TAVI_final/CT/Dino/results/merged_merged/100_percent",
     "train_dataset": "merged",
     "data_percentage": 100
   },
-  "img_size": 448,
+  "img_size": 224,
   "image_mean": [
     0.485,
     0.456,
@@ -32,7 +32,7 @@
   "swa_lr": 8e-05,
   "swa_epoch_start": 0.75,
   "freeze_bn": true,
-  "unfreeze_epoch": 50,
+  "unfreeze_epoch": 100,
   "unfreeze_last_n_blocks": 2,
   "backbone_lr_multiplier": 0.03,
   "batch_size": 16,
@@ -46,9 +46,9 @@
   "early_stopping_metric": "val_auroc",
   "early_stopping_mode": "max",
   "early_stopping_min_delta": 0.001,
-  "use_wandb": false,
+  "use_wandb": true,
   "wandb_project": "Final_Combined",
-  "run_name": "merged4",
+  "run_name": "dino_merged",
   "num_gpus": 1,
   "num_workers": 8,
   "config_file": "config.json",
@@ -61,7 +61,7 @@
     "metadata_path": "/home/ubuntu/TAVI_new/dataset/new_features_table.xlsx"
   },
   "gradcam": {
-    "enabled": true,
+    "enabled": false,
     "save_per_fold": true,
     "save_ensemble_average": true
   },
@@ -80,5 +80,7 @@
       "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits/merged/fold5.xlsx"
     ],
     "test_policy": "Only the fixed original test_dataset/test.xlsx is used for final testing."
-  }
+  },
+  "model_name": "hf_hub:Snarcy/RadioDino-s8",
+  "embed_dim": 38
 }

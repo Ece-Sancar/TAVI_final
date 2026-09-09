@@ -1,16 +1,16 @@
 {
   "dataset_root": "/home/ubuntu/TAVI_final/dataset/construct/dataset_splits",
   "data_root": "/home/ubuntu/final_dataset",
-  "checkpoint_dir": "checkpoints/lmu_merged",
-  "output_dir": "results/lmu_merged",
+  "checkpoint_dir": "checkpoints/merged_merged",
+  "output_dir": "results/merged_merged",
   "train_dataset": "pre",
   "test_dataset": "merged",
   "data_percentage": 100,
   "max_epochs": 5000,
   "pretrained": {
-    "checkpoint_dir": "/home/ubuntu/TAVI_final/Combined/Dino/checkpoints/lmu_lmu/100_percent",
-    "output_dir": "/home/ubuntu/TAVI_final/Combined/Dino/results/lmu_lmu/100_percent",
-    "train_dataset": "lmu",
+    "checkpoint_dir": "/home/ubuntu/TAVI_final/Combined/Dino/checkpoints/merged_merged/100_percent",
+    "output_dir": "/home/ubuntu/TAVI_final/Combined/Dino/results/merged_merged/100_percent",
+    "train_dataset": "merged",
     "data_percentage": 100
   },
   "img_size": 224,
@@ -55,7 +55,7 @@
   "dropout_rate_image": 0.3,
   "dropout_rate_tabular": 0.25,
   "feature_importance": {
-    "enabled": false,
+    "enabled": true,
     "n_repeats": 5,
     "top_k": 15,
     "metadata_path": "/home/ubuntu/TAVI_new/dataset/new_features_table.xlsx"

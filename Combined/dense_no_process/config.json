@@ -3,7 +3,7 @@
   "data_root": "/home/ubuntu/final_dataset",
   "checkpoint_dir": "checkpoints/merged_merged4",
   "output_dir": "results/merged_merged4",
-  "train_dataset": "pre",
+  "train_dataset": "merged",
   "test_dataset": "merged",
   "data_percentage": 100,
   "max_epochs": 5000,
@@ -55,13 +55,13 @@
   "dropout_rate_image": 0.3,
   "dropout_rate_tabular": 0.25,
   "feature_importance": {
-    "enabled": true,
+    "enabled": false,
     "n_repeats": 5,
     "top_k": 15,
     "metadata_path": "/home/ubuntu/TAVI_new/dataset/new_features_table.xlsx"
   },
   "gradcam": {
-    "enabled": true,
+    "enabled": false,
     "save_per_fold": true,
     "save_ensemble_average": true
   },
