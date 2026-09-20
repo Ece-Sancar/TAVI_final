@@ -1,2881 +1,1719 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Final TAVI dataset construction / harmonization.
+
+Goals
+-----
+1. Build the exact same patient cohort for tabular, CT-only and combined models
+   by keeping only patients with an available image.
+2. Harmonize TUM and LMU tabular definitions before splitting.
+3. Remove known high-risk missingness/leakage features from BOTH sites.
+4. Keep identical columns and column order for TUM, LMU and merged datasets.
+5. Recalculate calcium totals from components consistently.
+6. Convert LMU raw perimeter/area values to the derived-diameter definitions
+   already used by TUM.
+7. Harmonize LVEF top-coding and ECC_INDEX precision.
+8. Add QRS/PQ intervals by patient ID.
+9. Create one fixed independent test set + five development folds per site.
+10. Guarantee merged test/foldX == corresponding TUM + LMU split exactly.
+11. Build balanced data-size subsets while keeping the same fixed test set.
+12. Save dataset-audit tables so domain/missingness artifacts remain visible.
+13. Enforce exact No Event/Pacemaker balance in every fixed test set.
+14. Plot post-drop top-10 missingness for TUM, LMU and merged cohorts.
+15. Run No Event vs Pacemaker MWU + BH-FDR significance analysis for all three cohorts.
+
+IMPORTANT
+---------
+- The script does NOT impute model inputs. Imputation/native-NaN handling belongs
+  inside each model pipeline and must be fit using training data only.
+- The script does NOT add missingness-mask columns. Known label-dependent
+  missingness variables are removed from both sites before model training.
+- Every harmonization choice is explicit in the CONFIGURATION section.
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
+import json
+import math
 import re
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.stats import mannwhitneyu
 
 
-# ============================================================
+# =============================================================================
 # CONFIGURATION
-# ============================================================
+# =============================================================================
 
 TUM_EXCEL_PATH = Path("./tum.xlsx")
 LMU_EXCEL_PATH = Path("./lmu.xlsx")
 
+# Same cohort is used for tabular, CT-only and combined experiments.
 IMAGE_ROOT = Path("/home/ubuntu/final_dataset")
 
-# ECG interval source files.
 TUM_ECG_INTERVAL_PATH = Path(
     "/home/ubuntu/TAVI_new/dataset/dataset_new_binary.xlsx"
 )
-
 LMU_ECG_INTERVAL_PATH = Path(
     "/home/ubuntu/TAVI_final/dataset/ecg/ecg_intervals_lmu/ecg.xlsx"
 )
 
-# Output files.
-ENTIRE_OUTPUT_PATH = Path("./entire.xlsx")
-TUM_CLEANED_OUTPUT_PATH = Path("./tum_cleaned.xlsx")
-LMU_CLEANED_OUTPUT_PATH = Path("./lmu_cleaned.xlsx")
+OUTPUT_ROOT = Path(".")
+TUM_CLEANED_OUTPUT_PATH = OUTPUT_ROOT / "tum_cleaned.xlsx"
+LMU_CLEANED_OUTPUT_PATH = OUTPUT_ROOT / "lmu_cleaned.xlsx"
+ENTIRE_OUTPUT_PATH = OUTPUT_ROOT / "entire.xlsx"
+SPLIT_OUTPUT_ROOT = OUTPUT_ROOT / "dataset_splits"
+AUDIT_OUTPUT_ROOT = OUTPUT_ROOT / "dataset_audit"
 
-SPLIT_OUTPUT_ROOT = Path("./dataset_splits")
-
-# Distribution plot output paths.
-PQ_DISTRIBUTION_PLOT_PATH = Path("./pq_distribution.png")
-QRS_DISTRIBUTION_PLOT_PATH = Path("./qrs_distribution.png")
-
-# Change manually if automatic ID-column detection is incorrect.
-#
-# Example:
-# ID_COLUMN = "ID"
-ID_COLUMN = None
-
+ID_COLUMN: Optional[str] = "ID"
 LABEL_COLUMN = "LABEL"
 SEX_COLUMN = "SEX"
-
 QRS_COLUMN = "QRSADM"
 PQ_COLUMN = "PQADM"
 
-# Around 20% of each LABEL × SEX group goes into the fixed test set.
 TEST_FRACTION = 0.20
-
 N_FOLDS = 5
 RANDOM_SEED = 42
 
-# Histogram configuration.
-HISTOGRAM_BINS = 50
-PLOT_DPI = 300
+DATA_SIZE_PERCENTAGES = [2, 5, 10, 20, 50]
+DATA_SIZE_OUTPUT_ROOT = SPLIT_OUTPUT_ROOT / "data_size"
 
-# Large presentation-friendly fonts.
-FONT_SIZE = 20
-TICK_FONT_SIZE = 18
-LEGEND_FONT_SIZE = 18
-LINE_WIDTH = 3.0
+# -----------------------------------------------------------------------------
+# FINAL HARMONIZATION CHOICES
+# -----------------------------------------------------------------------------
 
-# Image file extensions that will be considered.
-IMAGE_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".webp",
+# These variables are removed from BOTH sites, preserving an identical schema.
+# Rationale:
+# - LMU NTPROBNPPRE is essentially unavailable.
+# - LMU DM/CABGPRE missingness is strongly label-dependent and can act as a
+#   shortcut/leakage signal even when the numerical values are not informative.
+DROP_FEATURE_COLUMNS = [
+    "DM",
+    "CABGPRE",
+    "NTPROBNPPRE",
+]
+
+# Recompute totals from the three anatomical components in BOTH sites.
+# A total is only produced when all three components are present.
+RECALCULATE_CALCIUM_TOTALS = True
+CALCIUM_GROUPS = {
+    "CT_ValvScTot": ["CT_ValScNCC", "CT_ValScRCC", "CT_ValScLCC"],
+    "CT_AnnScTot": ["CT_AnnScNCC", "CT_AnnScRCC", "CT_AnnScLCC"],
+    "CT_LVOTScTot": ["CT_LVOTScNCC", "CT_LVOTScRCC", "CT_LVOTScLCC"],
 }
 
-# Candidate names used to automatically find an ID column.
+# The uploaded LMU table contains raw perimeter and area in columns whose names
+# indicate derived diameters. TUM already contains derived diameters.
+# LMU conversion:
+#   perimeter-derived diameter = perimeter / pi
+#   area-derived diameter      = 2 * sqrt(area / pi)
+CONVERT_LMU_GEOMETRY_TO_DERIVED_DIAMETERS = True
+PERIMETER_DERIVED_COLUMN = "CT_Peri_Deri"
+AREA_DERIVED_COLUMN = "CT_Area_Deri"
+
+# TUM LVEF is top-coded at 60 in the supplied table. To prevent values >60 from
+# identifying LMU, harmonize both sites to the same ceiling.
+# This is a harmonization assumption and should be documented in the methods.
+CAP_LVEF_AT_60 = True
+LVEF_COLUMN = "LVEFPRE"
+LVEF_CAP = 60.0
+
+# LMU ECC_INDEX is available only at ~2-decimal precision in the supplied file.
+# Lost precision cannot be recreated. Therefore both sites are rounded to 2
+# decimals to prevent precision itself from becoming a site signal.
+ROUND_ECC_INDEX = True
+ECC_INDEX_COLUMN = "ECC_INDEX"
+ECC_INDEX_DECIMALS = 2
+
+# If True, construction stops rather than silently aligning mismatched schemas.
+STRICT_IDENTICAL_COLUMNS = True
+
+# Missingness is audited, but columns are NOT automatically dropped based on a
+# numeric threshold. This avoids silently removing clinically useful variables.
+MISSINGNESS_WARNING_THRESHOLD = 0.40
+LABEL_MISSINGNESS_GAP_WARNING = 0.20
+
+# Audit-plot / significance-analysis configuration.
+TOP_MISSINGNESS_COLUMNS = 10
+SIGNIFICANCE_ALPHA_FDR = 0.05
+PLOT_DPI = 300
+SIGNIFICANCE_FIGSIZE = (14, 7)
+MISSINGNESS_FIGSIZE = (14, 7)
+BASE_FONTSIZE = 20
+TITLE_FONTSIZE = 24
+LABEL_FONTSIZE = 22
+TICK_FONTSIZE = 18
+LEGEND_FONTSIZE = 18
+
+IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"
+}
+
 ID_COLUMN_CANDIDATES = [
-    "ID",
-    "PATIENT_ID",
-    "PATIENTID",
-    "PatientID",
-    "patient_id",
-    "Patient_ID",
-    "IMAGE_ID",
-    "IMAGEID",
-    "ImageID",
-    "image_id",
-    "SUBJECT_ID",
-    "SUBJECTID",
-    "SubjectID",
-    "subject_id",
+    "ID", "PATIENT_ID", "PATIENTID", "PatientID", "patient_id",
+    "Patient_ID", "IMAGE_ID", "IMAGEID", "ImageID", "image_id",
+    "SUBJECT_ID", "SUBJECTID", "SubjectID", "subject_id",
 ]
 
-# ============================================================
-# DATA-SIZE EXPERIMENT CONFIGURATION
-# ============================================================
 
-DATA_SIZE_PERCENTAGES = [
-    2,
-    5,
-    10,
-    20,
-    50,
-]
+# =============================================================================
+# GENERAL UTILITIES
+# =============================================================================
 
-DATA_SIZE_OUTPUT_ROOT = (
-    SPLIT_OUTPUT_ROOT
-    / "data_size"
-)
-
-
-# ============================================================
-# UTILITY FUNCTIONS
-# ============================================================
-
-def normalize_identifier(value):
-    """
-    Convert an Excel ID or image filename stem into a comparable string.
-
-    Examples:
-        123       -> "123"
-        123.0     -> "123"
-        " 123 "   -> "123"
-        "00123"   -> "00123"
-        "123.png" -> "123"
-
-    Leading zeros in string IDs are preserved.
-    """
+def normalize_identifier(value) -> Optional[str]:
     if pd.isna(value):
         return None
-
-    value_str = str(value).strip()
-
-    if not value_str:
+    text = str(value).strip()
+    if not text:
         return None
-
-    # Remove image extension if the Excel ID includes one.
-    suffix = Path(value_str).suffix.lower()
-
+    suffix = Path(text).suffix.lower()
     if suffix in IMAGE_EXTENSIONS:
-        value_str = Path(value_str).stem.strip()
-
-    # Excel often represents integer IDs as values such as 123.0.
-    if re.fullmatch(r"-?\d+\.0+", value_str):
-        value_str = value_str.split(".")[0]
-
-    return value_str
+        text = Path(text).stem.strip()
+    if re.fullmatch(r"-?\d+\.0+", text):
+        text = text.split(".")[0]
+    return text
 
 
-def find_id_column(df, requested_column=None):
-    """
-    Find the ID column in a dataframe.
-    """
+def find_id_column(df: pd.DataFrame, requested_column: Optional[str]) -> str:
     if requested_column is not None:
         if requested_column not in df.columns:
             raise ValueError(
-                f"Configured ID column '{requested_column}' was not found.\n"
-                f"Available columns:\n{list(df.columns)}"
+                f"Configured ID column {requested_column!r} not found. "
+                f"Available: {list(df.columns)}"
             )
-
         return requested_column
 
-    # Exact candidate matches.
     for candidate in ID_COLUMN_CANDIDATES:
         if candidate in df.columns:
             return candidate
 
-    # Case-insensitive candidate matches.
-    lower_to_original = {
-        str(column).strip().lower(): column
-        for column in df.columns
-    }
-
+    lower_to_original = {str(c).strip().lower(): c for c in df.columns}
     for candidate in ID_COLUMN_CANDIDATES:
-        candidate_lower = candidate.lower()
+        if candidate.lower() in lower_to_original:
+            return lower_to_original[candidate.lower()]
 
-        if candidate_lower in lower_to_original:
-            return lower_to_original[candidate_lower]
-
-    raise ValueError(
-        "Could not automatically determine the ID column.\n"
-        "Set ID_COLUMN at the top of the script.\n"
-        f"Available columns:\n{list(df.columns)}"
-    )
+    raise ValueError(f"Could not determine ID column. Columns: {list(df.columns)}")
 
 
-def validate_required_columns(df, dataset_name):
-    """
-    Check that LABEL and SEX exist and have no missing values.
-    """
-    required_columns = [
-        LABEL_COLUMN,
-        SEX_COLUMN,
-    ]
+def normalize_binary_label(value) -> int:
+    value_str = str(value).strip().lower()
+    mapping = {
+        "no event": 0, "no_event": 0, "noevent": 0, "0": 0,
+        "pacer": 1, "pacemaker": 1, "1": 1,
+    }
+    if value_str not in mapping:
+        raise ValueError(f"Unsupported LABEL value: {value!r}")
+    return mapping[value_str]
 
-    missing_columns = [
-        column
-        for column in required_columns
-        if column not in df.columns
-    ]
 
-    if missing_columns:
-        raise ValueError(
-            f"{dataset_name} is missing required columns: "
-            f"{missing_columns}\n"
-            f"Available columns:\n{list(df.columns)}"
-        )
+def validate_required_columns(df: pd.DataFrame, dataset_name: str) -> None:
+    required = [LABEL_COLUMN, SEX_COLUMN]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{dataset_name} missing required columns: {missing}")
 
-    for column in required_columns:
-        missing_count = int(
-            df[column].isna().sum()
-        )
-
-        if missing_count > 0:
+    for column in required:
+        if df[column].isna().any():
             raise ValueError(
-                f"{dataset_name} has {missing_count} missing values "
-                f"in '{column}'.\n"
-                "Fill or remove these values before constructing "
-                "stratified splits."
+                f"{dataset_name} has {int(df[column].isna().sum())} missing "
+                f"values in required column {column!r}."
             )
 
 
-def collect_image_identifiers(image_root):
-    """
-    Recursively scan the image directory and collect image filename stems.
-    """
+def validate_unique_ids(df: pd.DataFrame, id_column: str, dataset_name: str) -> None:
+    normalized = df[id_column].map(normalize_identifier)
+    if normalized.isna().any():
+        raise ValueError(f"{dataset_name} contains unusable/missing IDs.")
+    duplicated = normalized.duplicated(keep=False)
+    if duplicated.any():
+        ids = normalized.loc[duplicated].drop_duplicates().head(20).tolist()
+        raise ValueError(f"{dataset_name} contains duplicate IDs: {ids}")
+
+
+def ensure_no_cross_site_id_overlap(
+    tum_df: pd.DataFrame,
+    lmu_df: pd.DataFrame,
+    tum_id_column: str,
+    lmu_id_column: str,
+) -> None:
+    tum_ids = set(tum_df[tum_id_column].map(normalize_identifier).dropna())
+    lmu_ids = set(lmu_df[lmu_id_column].map(normalize_identifier).dropna())
+    overlap = sorted(tum_ids.intersection(lmu_ids))
+    if overlap:
+        raise ValueError(
+            f"TUM and LMU contain {len(overlap)} overlapping normalized IDs. "
+            f"First examples: {overlap[:20]}"
+        )
+
+
+def make_output_dirs() -> None:
+    for path in [SPLIT_OUTPUT_ROOT, DATA_SIZE_OUTPUT_ROOT, AUDIT_OUTPUT_ROOT]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+# =============================================================================
+# HARMONIZATION
+# =============================================================================
+
+def _numeric(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        raise ValueError(f"Required harmonization column {column!r} is missing.")
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def recalculate_calcium_totals(
+    df: pd.DataFrame,
+    dataset_name: str,
+    change_log: List[Dict[str, object]],
+) -> pd.DataFrame:
+    output = df.copy()
+
+    for total_column, components in CALCIUM_GROUPS.items():
+        missing_components = [c for c in components if c not in output.columns]
+        if missing_components:
+            raise ValueError(
+                f"{dataset_name}: cannot calculate {total_column}; "
+                f"missing {missing_components}."
+            )
+
+        component_frame = output[components].apply(pd.to_numeric, errors="coerce")
+        recalculated = component_frame.sum(axis=1, min_count=len(components))
+
+        old = (
+            pd.to_numeric(output[total_column], errors="coerce")
+            if total_column in output.columns
+            else pd.Series(np.nan, index=output.index)
+        )
+
+        comparable = old.notna() & recalculated.notna()
+        changed = comparable & (~np.isclose(old, recalculated, equal_nan=True))
+        large_difference = comparable & ((old - recalculated).abs() > 5)
+
+        change_log.append({
+            "dataset": dataset_name,
+            "operation": "recalculate_calcium_total",
+            "column": total_column,
+            "rows": len(output),
+            "old_nonmissing": int(old.notna().sum()),
+            "new_nonmissing": int(recalculated.notna().sum()),
+            "changed_comparable_rows": int(changed.sum()),
+            "old_vs_new_abs_diff_gt_5": int(large_difference.sum()),
+            "detail": "+".join(components),
+        })
+
+        output[total_column] = recalculated
+
+    return output
+
+
+def convert_lmu_geometry(
+    lmu_df: pd.DataFrame,
+    change_log: List[Dict[str, object]],
+) -> pd.DataFrame:
+    output = lmu_df.copy()
+
+    perimeter = _numeric(output, PERIMETER_DERIVED_COLUMN)
+    area = _numeric(output, AREA_DERIVED_COLUMN)
+
+    new_perimeter_derived = perimeter / math.pi
+    new_area_derived = 2.0 * np.sqrt(area / math.pi)
+
+    change_log.append({
+        "dataset": "LMU",
+        "operation": "convert_raw_perimeter_to_derived_diameter",
+        "column": PERIMETER_DERIVED_COLUMN,
+        "rows": len(output),
+        "old_nonmissing": int(perimeter.notna().sum()),
+        "new_nonmissing": int(new_perimeter_derived.notna().sum()),
+        "changed_comparable_rows": int((perimeter.notna()).sum()),
+        "old_vs_new_abs_diff_gt_5": int(
+            ((perimeter - new_perimeter_derived).abs() > 5).fillna(False).sum()
+        ),
+        "detail": "new = old / pi",
+    })
+
+    change_log.append({
+        "dataset": "LMU",
+        "operation": "convert_raw_area_to_derived_diameter",
+        "column": AREA_DERIVED_COLUMN,
+        "rows": len(output),
+        "old_nonmissing": int(area.notna().sum()),
+        "new_nonmissing": int(new_area_derived.notna().sum()),
+        "changed_comparable_rows": int((area.notna()).sum()),
+        "old_vs_new_abs_diff_gt_5": int(
+            ((area - new_area_derived).abs() > 5).fillna(False).sum()
+        ),
+        "detail": "new = 2*sqrt(old/pi)",
+    })
+
+    output[PERIMETER_DERIVED_COLUMN] = new_perimeter_derived
+    output[AREA_DERIVED_COLUMN] = new_area_derived
+    return output
+
+
+def cap_lvef(
+    df: pd.DataFrame,
+    dataset_name: str,
+    change_log: List[Dict[str, object]],
+) -> pd.DataFrame:
+    output = df.copy()
+    values = _numeric(output, LVEF_COLUMN)
+    changed = values > LVEF_CAP
+    output[LVEF_COLUMN] = values.clip(upper=LVEF_CAP)
+
+    change_log.append({
+        "dataset": dataset_name,
+        "operation": "cap_lvef",
+        "column": LVEF_COLUMN,
+        "rows": len(output),
+        "old_nonmissing": int(values.notna().sum()),
+        "new_nonmissing": int(output[LVEF_COLUMN].notna().sum()),
+        "changed_comparable_rows": int(changed.fillna(False).sum()),
+        "old_vs_new_abs_diff_gt_5": int(((values - LVEF_CAP) > 5).fillna(False).sum()),
+        "detail": f"values > {LVEF_CAP:g} replaced by {LVEF_CAP:g}",
+    })
+    return output
+
+
+def round_ecc_index(
+    df: pd.DataFrame,
+    dataset_name: str,
+    change_log: List[Dict[str, object]],
+) -> pd.DataFrame:
+    output = df.copy()
+    values = _numeric(output, ECC_INDEX_COLUMN)
+    rounded = values.round(ECC_INDEX_DECIMALS)
+    changed = values.notna() & (~np.isclose(values, rounded, equal_nan=True))
+    output[ECC_INDEX_COLUMN] = rounded
+
+    change_log.append({
+        "dataset": dataset_name,
+        "operation": "round_ecc_index",
+        "column": ECC_INDEX_COLUMN,
+        "rows": len(output),
+        "old_nonmissing": int(values.notna().sum()),
+        "new_nonmissing": int(rounded.notna().sum()),
+        "changed_comparable_rows": int(changed.sum()),
+        "old_vs_new_abs_diff_gt_5": 0,
+        "detail": f"rounded to {ECC_INDEX_DECIMALS} decimals",
+    })
+    return output
+
+
+def drop_problematic_features(
+    df: pd.DataFrame,
+    dataset_name: str,
+    change_log: List[Dict[str, object]],
+) -> pd.DataFrame:
+    output = df.copy()
+    missing = [c for c in DROP_FEATURE_COLUMNS if c not in output.columns]
+    if missing:
+        raise ValueError(
+            f"{dataset_name}: configured DROP_FEATURE_COLUMNS are absent: {missing}. "
+            "Update the configuration explicitly rather than silently continuing."
+        )
+
+    for column in DROP_FEATURE_COLUMNS:
+        change_log.append({
+            "dataset": dataset_name,
+            "operation": "drop_feature",
+            "column": column,
+            "rows": len(output),
+            "old_nonmissing": int(output[column].notna().sum()),
+            "new_nonmissing": 0,
+            "changed_comparable_rows": len(output),
+            "old_vs_new_abs_diff_gt_5": 0,
+            "detail": "removed from BOTH sites to preserve identical schema",
+        })
+
+    return output.drop(columns=DROP_FEATURE_COLUMNS)
+
+
+def enforce_identical_schema(
+    tum_df: pd.DataFrame,
+    lmu_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    tum_columns = list(tum_df.columns)
+    lmu_columns = list(lmu_df.columns)
+
+    if set(tum_columns) != set(lmu_columns):
+        tum_only = sorted(set(tum_columns) - set(lmu_columns))
+        lmu_only = sorted(set(lmu_columns) - set(tum_columns))
+        message = (
+            "TUM/LMU schemas differ after harmonization.\n"
+            f"TUM-only columns: {tum_only}\n"
+            f"LMU-only columns: {lmu_only}"
+        )
+        if STRICT_IDENTICAL_COLUMNS:
+            raise ValueError(message)
+        print("WARNING:", message)
+
+    # Canonical order is always TUM's order.
+    lmu_df = lmu_df.reindex(columns=tum_columns)
+    return tum_df, lmu_df
+
+
+def harmonize_base_datasets(
+    tum_df: pd.DataFrame,
+    lmu_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Apply deterministic site-harmonization before cohort filtering/splitting."""
+    change_log: List[Dict[str, object]] = []
+
+    tum = tum_df.copy()
+    lmu = lmu_df.copy()
+
+    if RECALCULATE_CALCIUM_TOTALS:
+        tum = recalculate_calcium_totals(tum, "TUM", change_log)
+        lmu = recalculate_calcium_totals(lmu, "LMU", change_log)
+
+    if CONVERT_LMU_GEOMETRY_TO_DERIVED_DIAMETERS:
+        lmu = convert_lmu_geometry(lmu, change_log)
+
+    if CAP_LVEF_AT_60:
+        tum = cap_lvef(tum, "TUM", change_log)
+        lmu = cap_lvef(lmu, "LMU", change_log)
+
+    if ROUND_ECC_INDEX:
+        tum = round_ecc_index(tum, "TUM", change_log)
+        lmu = round_ecc_index(lmu, "LMU", change_log)
+
+    tum = drop_problematic_features(tum, "TUM", change_log)
+    lmu = drop_problematic_features(lmu, "LMU", change_log)
+
+    tum, lmu = enforce_identical_schema(tum, lmu)
+    return tum, lmu, pd.DataFrame(change_log)
+
+
+# =============================================================================
+# IMAGE COHORT FILTERING
+# =============================================================================
+
+def collect_image_identifiers(image_root: Path) -> set[str]:
     if not image_root.exists():
-        raise FileNotFoundError(
-            f"Image directory does not exist: {image_root}"
-        )
+        raise FileNotFoundError(f"Image directory does not exist: {image_root}")
 
-    image_ids = set()
-    image_file_count = 0
-
+    ids: set[str] = set()
+    file_count = 0
     for path in image_root.rglob("*"):
-        if not path.is_file():
-            continue
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
+            normalized = normalize_identifier(path.stem)
+            if normalized is not None:
+                ids.add(normalized)
+                file_count += 1
 
-        if path.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
+    if file_count == 0:
+        raise RuntimeError(f"No supported images found under {image_root}")
 
-        normalized_id = normalize_identifier(
-            path.stem
-        )
-
-        if normalized_id is not None:
-            image_ids.add(normalized_id)
-            image_file_count += 1
-
-    if image_file_count == 0:
-        raise RuntimeError(
-            f"No supported images were found under: {image_root}"
-        )
-
-    print(
-        f"Found {image_file_count} image files representing "
-        f"{len(image_ids)} unique image IDs."
-    )
-
-    return image_ids
+    print(f"Found {file_count} image files representing {len(ids)} unique IDs.")
+    return ids
 
 
 def clean_dataframe_using_images(
-    df,
-    image_ids,
-    id_column,
-    dataset_name,
-):
-    """
-    Keep only rows whose normalized ID exists among image filenames.
-    """
-    cleaned_df = df.copy()
+    df: pd.DataFrame,
+    image_ids: set[str],
+    id_column: str,
+    dataset_name: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    normalized = df[id_column].map(normalize_identifier)
+    keep = normalized.notna() & normalized.isin(image_ids)
+    cleaned = df.loc[keep].copy().reset_index(drop=True)
+    removed = df.loc[~keep].copy().reset_index(drop=True)
 
-    normalized_ids = cleaned_df[
-        id_column
-    ].map(normalize_identifier)
-
-    missing_id_mask = normalized_ids.isna()
-    missing_image_mask = ~normalized_ids.isin(
-        image_ids
-    )
-
-    remove_mask = (
-        missing_id_mask
-        | missing_image_mask
-    )
-
-    removed_df = cleaned_df.loc[
-        remove_mask
-    ].copy()
-
-    cleaned_df = cleaned_df.loc[
-        ~remove_mask
-    ].copy()
-
-    cleaned_df.reset_index(
-        drop=True,
-        inplace=True,
-    )
-
-    removed_df.reset_index(
-        drop=True,
-        inplace=True,
-    )
-
-    print()
-    print(f"{dataset_name} image matching")
-    print("-" * 60)
-    print(f"Original rows:             {len(df)}")
-    print(f"Rows removed:              {len(removed_df)}")
-    print(f"Rows remaining:            {len(cleaned_df)}")
     print(
-        f"Rows with missing IDs:     "
-        f"{int(missing_id_mask.sum())}"
+        f"{dataset_name}: original={len(df)}, kept={len(cleaned)}, "
+        f"removed_without_image={len(removed)}"
     )
-
-    if len(removed_df) > 0:
-        missing_examples = (
-            removed_df[id_column]
-            .head(20)
-            .astype(str)
-            .tolist()
-        )
-
-        print(
-            "First missing/unmatched IDs: "
-            + ", ".join(missing_examples)
-        )
-
-    return cleaned_df, removed_df
+    return cleaned, removed
 
 
-# ============================================================
+# =============================================================================
 # ECG INTERVAL MATCHING
-# ============================================================
+# =============================================================================
 
-def load_interval_table(
-    interval_path,
-    dataset_name,
-):
-    """
-    Load an ECG interval file and retain:
-        ID
-        QRSADM
-        PQADM
-
-    Duplicate interval IDs are rejected because they would produce
-    ambiguous matches.
-    """
+def load_interval_table(interval_path: Path, dataset_name: str) -> pd.DataFrame:
     if not interval_path.exists():
-        raise FileNotFoundError(
-            f"{dataset_name} ECG interval file does not exist: "
-            f"{interval_path}"
-        )
+        raise FileNotFoundError(f"{dataset_name} ECG file not found: {interval_path}")
 
-    interval_df = pd.read_excel(
-        interval_path
-    )
+    df = pd.read_excel(interval_path)
+    id_column = find_id_column(df, ID_COLUMN)
+    required = [QRS_COLUMN, PQ_COLUMN]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{dataset_name} ECG file missing columns: {missing}")
 
-    interval_id_column = find_id_column(
-        interval_df,
-        ID_COLUMN,
-    )
+    output = df[[id_column, QRS_COLUMN, PQ_COLUMN]].copy()
+    output["_NORMALIZED_ID"] = output[id_column].map(normalize_identifier)
+    output = output.loc[output["_NORMALIZED_ID"].notna()].copy()
 
-    missing_columns = [
-        column
-        for column in [
-            QRS_COLUMN,
-            PQ_COLUMN,
-        ]
-        if column not in interval_df.columns
-    ]
+    dup = output["_NORMALIZED_ID"].duplicated(keep=False)
+    if dup.any():
+        values = output.loc[dup, "_NORMALIZED_ID"].drop_duplicates().head(20).tolist()
+        raise ValueError(f"{dataset_name} ECG file has duplicate IDs: {values}")
 
-    if missing_columns:
-        raise ValueError(
-            f"{dataset_name} ECG interval file is missing columns: "
-            f"{missing_columns}\n"
-            f"Available columns:\n{list(interval_df.columns)}"
-        )
-
-    interval_df = interval_df[
-        [
-            interval_id_column,
-            QRS_COLUMN,
-            PQ_COLUMN,
-        ]
-    ].copy()
-
-    interval_df["_NORMALIZED_ID"] = (
-        interval_df[
-            interval_id_column
-        ].map(normalize_identifier)
-    )
-
-    # Remove interval rows without a usable ID.
-    interval_df = interval_df.loc[
-        interval_df["_NORMALIZED_ID"].notna()
-    ].copy()
-
-    duplicate_mask = interval_df[
-        "_NORMALIZED_ID"
-    ].duplicated(
-        keep=False
-    )
-
-    if duplicate_mask.any():
-        duplicate_ids = (
-            interval_df.loc[
-                duplicate_mask,
-                "_NORMALIZED_ID",
-            ]
-            .drop_duplicates()
-            .head(20)
-            .tolist()
-        )
-
-        raise ValueError(
-            f"{dataset_name} ECG interval file contains duplicate IDs.\n"
-            f"First duplicate IDs: {duplicate_ids}"
-        )
-
-    interval_df[QRS_COLUMN] = pd.to_numeric(
-        interval_df[QRS_COLUMN],
-        errors="coerce",
-    )
-
-    interval_df[PQ_COLUMN] = pd.to_numeric(
-        interval_df[PQ_COLUMN],
-        errors="coerce",
-    )
-
-    interval_df = interval_df[
-        [
-            "_NORMALIZED_ID",
-            QRS_COLUMN,
-            PQ_COLUMN,
-        ]
-    ].copy()
-
-    print()
-    print(f"{dataset_name} ECG interval source")
-    print("-" * 60)
-    print(f"Source file:               {interval_path}")
-    print(f"Rows with valid ID:        {len(interval_df)}")
-    print(
-        f"Rows with QRSADM:          "
-        f"{int(interval_df[QRS_COLUMN].notna().sum())}"
-    )
-    print(
-        f"Rows with PQADM:           "
-        f"{int(interval_df[PQ_COLUMN].notna().sum())}"
-    )
-
-    return interval_df
+    output[QRS_COLUMN] = pd.to_numeric(output[QRS_COLUMN], errors="coerce")
+    output[PQ_COLUMN] = pd.to_numeric(output[PQ_COLUMN], errors="coerce")
+    return output[["_NORMALIZED_ID", QRS_COLUMN, PQ_COLUMN]]
 
 
 def add_ecg_intervals(
-    dataset_df,
-    dataset_id_column,
-    interval_df,
-    dataset_name,
-):
-    """
-    Add QRSADM and PQADM to a dataset by matching normalized IDs.
-
-    This performs a left join, so dataset rows are not removed when an
-    interval is unavailable.
-    """
-    output_df = dataset_df.copy()
-
-    # Remove existing versions to avoid merge suffixes.
-    columns_to_drop = [
-        column
-        for column in [
-            QRS_COLUMN,
-            PQ_COLUMN,
-        ]
-        if column in output_df.columns
-    ]
-
-    if columns_to_drop:
-        print(
-            f"{dataset_name}: replacing existing columns "
-            f"{columns_to_drop}"
-        )
-
-        output_df = output_df.drop(
-            columns=columns_to_drop
-        )
-
-    output_df["_NORMALIZED_ID"] = (
-        output_df[
-            dataset_id_column
-        ].map(normalize_identifier)
+    dataset_df: pd.DataFrame,
+    dataset_id_column: str,
+    interval_df: pd.DataFrame,
+    dataset_name: str,
+) -> pd.DataFrame:
+    output = dataset_df.copy()
+    output = output.drop(
+        columns=[c for c in [QRS_COLUMN, PQ_COLUMN] if c in output.columns],
+        errors="ignore",
     )
-
-    output_df = output_df.merge(
+    output["_NORMALIZED_ID"] = output[dataset_id_column].map(normalize_identifier)
+    output = output.merge(
         interval_df,
         how="left",
         on="_NORMALIZED_ID",
         validate="many_to_one",
-    )
+    ).drop(columns="_NORMALIZED_ID")
 
-    matched_qrs = int(
-        output_df[
-            QRS_COLUMN
-        ].notna().sum()
-    )
-
-    matched_pq = int(
-        output_df[
-            PQ_COLUMN
-        ].notna().sum()
-    )
-
-    both_matched = int(
-        (
-            output_df[QRS_COLUMN].notna()
-            & output_df[PQ_COLUMN].notna()
-        ).sum()
-    )
-
-    neither_matched = int(
-        (
-            output_df[QRS_COLUMN].isna()
-            & output_df[PQ_COLUMN].isna()
-        ).sum()
-    )
-
-    print()
-    print(f"{dataset_name} ECG interval matching")
-    print("-" * 60)
-    print(f"Dataset rows:              {len(output_df)}")
-    print(f"QRSADM matched:            {matched_qrs}")
-    print(f"PQADM matched:             {matched_pq}")
-    print(f"Both values matched:       {both_matched}")
-    print(f"No interval values:        {neither_matched}")
-
-    output_df = output_df.drop(
-        columns="_NORMALIZED_ID"
-    )
-
-    # Store as nullable integers to preserve empty cells in Excel.
-    output_df[QRS_COLUMN] = (
-        pd.to_numeric(
-            output_df[QRS_COLUMN],
-            errors="coerce",
-        )
-        .round()
-        .astype("Int64")
-    )
-
-    output_df[PQ_COLUMN] = (
-        pd.to_numeric(
-            output_df[PQ_COLUMN],
-            errors="coerce",
-        )
-        .round()
-        .astype("Int64")
-    )
-
-    return output_df
-
-
-# ============================================================
-# DISTRIBUTION PLOTS
-# ============================================================
-
-def prepare_numeric_values(
-    df,
-    column,
-):
-    """
-    Return finite numerical values from a dataframe column.
-    """
-    values = pd.to_numeric(
-        df[column],
-        errors="coerce",
-    ).dropna().to_numpy(
-        dtype=float
-    )
-
-    return values[
-        np.isfinite(values)
-    ]
-
-
-def determine_common_histogram_bins(
-    tum_values,
-    lmu_values,
-    number_of_bins,
-):
-    """
-    Create common histogram bins for TUM and LMU.
-    """
-    combined_values = np.concatenate(
-        [
-            tum_values,
-            lmu_values,
-        ]
-    )
-
-    if len(combined_values) == 0:
-        raise ValueError(
-            "No valid values were available for plotting."
-        )
-
-    minimum = float(
-        np.min(combined_values)
-    )
-
-    maximum = float(
-        np.max(combined_values)
-    )
-
-    if minimum == maximum:
-        minimum -= 0.5
-        maximum += 0.5
-
-    return np.linspace(
-        minimum,
-        maximum,
-        number_of_bins + 1,
-    )
-
-
-def plot_domain_distribution(
-    tum_df,
-    lmu_df,
-    column,
-    x_label,
-    output_path,
-):
-    """
-    Plot TUM and LMU distributions as two grayscale step histograms.
-
-    Density normalization is used because TUM and LMU contain different
-    numbers of samples.
-    """
-    tum_values = prepare_numeric_values(
-        tum_df,
-        column,
-    )
-
-    lmu_values = prepare_numeric_values(
-        lmu_df,
-        column,
-    )
-
-    if len(tum_values) == 0:
-        print(
-            f"WARNING: no valid TUM values for {column}. "
-            f"Plot was not created."
-        )
-        return
-
-    if len(lmu_values) == 0:
-        print(
-            f"WARNING: no valid LMU values for {column}. "
-            f"Plot was not created."
-        )
-        return
-
-    bins = determine_common_histogram_bins(
-        tum_values=tum_values,
-        lmu_values=lmu_values,
-        number_of_bins=HISTOGRAM_BINS,
-    )
-
-    plt.rcParams.update(
-        {
-            "font.size": FONT_SIZE,
-            "font.family": "sans-serif",
-            "axes.labelsize": FONT_SIZE,
-            "xtick.labelsize": TICK_FONT_SIZE,
-            "ytick.labelsize": TICK_FONT_SIZE,
-            "legend.fontsize": LEGEND_FONT_SIZE,
-        }
-    )
-
-    figure, axis = plt.subplots(
-        figsize=(10, 7)
-    )
-
-    axis.hist(
-        tum_values,
-        bins=bins,
-        density=True,
-        histtype="step",
-        linewidth=LINE_WIDTH,
-        color="black",
-        label=f"TUM (n={len(tum_values)})",
-    )
-
-    axis.hist(
-        lmu_values,
-        bins=bins,
-        density=True,
-        histtype="step",
-        linewidth=LINE_WIDTH,
-        color="0.55",
-        linestyle="--",
-        label=f"LMU (n={len(lmu_values)})",
-    )
-
-    axis.set_xlabel(
-        x_label
-    )
-
-    axis.set_ylabel(
-        "Density"
-    )
-
-    # No title, as requested.
-    axis.legend(
-        frameon=False
-    )
-
-    axis.spines["top"].set_visible(
-        False
-    )
-
-    axis.spines["right"].set_visible(
-        False
-    )
-
-    axis.grid(
-        axis="y",
-        linestyle=":",
-        linewidth=1.0,
-        color="0.80",
-    )
-
-    figure.tight_layout()
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    figure.savefig(
-        output_path,
-        dpi=PLOT_DPI,
-        bbox_inches="tight",
-    )
-
-    plt.close(
-        figure
-    )
+    # Keep numeric values; do not impute here.
+    output[QRS_COLUMN] = pd.to_numeric(output[QRS_COLUMN], errors="coerce")
+    output[PQ_COLUMN] = pd.to_numeric(output[PQ_COLUMN], errors="coerce")
 
     print(
-        f"{column} distribution plot saved to: "
-        f"{output_path}"
+        f"{dataset_name}: QRS available={int(output[QRS_COLUMN].notna().sum())}/"
+        f"{len(output)}, PQ available={int(output[PQ_COLUMN].notna().sum())}/{len(output)}"
     )
+    return output
 
 
-# ============================================================
-# SPLIT CONSTRUCTION
-# ============================================================
+# =============================================================================
+# AUDIT TABLES + PLOTS
+# =============================================================================
 
-def make_stratification_key(df):
-    """
-    Construct a LABEL × SEX stratification key.
-    """
-    label_values = (
-        df[LABEL_COLUMN]
-        .astype(str)
-        .str.strip()
-    )
-
-    sex_values = (
-        df[SEX_COLUMN]
-        .astype(str)
-        .str.strip()
-    )
-
-    return (
-        label_values
-        + "__"
-        + sex_values
-    )
-
-
-def allocate_test_count(
-    group_size,
-    test_fraction,
-    n_folds,
-):
-    """
-    Choose the number of test samples for one LABEL × SEX group.
-
-    The allocation:
-      1. approximates TEST_FRACTION;
-      2. leaves at least one sample per development fold;
-      3. prefers a remaining development count divisible by five.
-    """
-    if group_size < n_folds + 1:
-        raise ValueError(
-            f"A stratification group contains only {group_size} samples. "
-            f"At least {n_folds + 1} samples are needed to create a "
-            "non-empty test split and five development folds."
-        )
-
-    target_test_count = (
-        group_size
-        * test_fraction
-    )
-
-    possible_counts = []
-
-    for test_count in range(
-        1,
-        group_size - n_folds + 1,
-    ):
-        remaining_count = (
-            group_size
-            - test_count
-        )
-
-        divisible = (
-            remaining_count
-            % n_folds
-            == 0
-        )
-
-        distance_from_target = abs(
-            test_count
-            - target_test_count
-        )
-
-        possible_counts.append(
-            (
-                0 if divisible else 1,
-                distance_from_target,
-                test_count,
-            )
-        )
-
-    possible_counts.sort()
-
-    return possible_counts[0][2]
-
-
-def create_fixed_test_and_folds(
-    df,
-    dataset_name,
-    random_seed,
-):
-    """
-    Split one domain into:
-        test
-        fold1
-        fold2
-        fold3
-        fold4
-        fold5
-
-    Splitting is performed independently inside every LABEL × SEX group.
-
-    Validation is performed using original row indices, so nullable values,
-    duplicate row contents, and pandas dtype differences do not cause
-    false validation failures.
-    """
-    df = df.copy().reset_index(drop=True)
-
-    df["_STRATIFICATION_KEY"] = make_stratification_key(
-        df
-    )
-
-    rng = np.random.default_rng(
-        random_seed
-    )
-
-    test_indices = []
-    fold_indices = [
-        []
-        for _ in range(N_FOLDS)
-    ]
-
-    grouped = df.groupby(
-        "_STRATIFICATION_KEY",
-        sort=True,
-        dropna=False,
-    )
-
-    print()
-    print(
-        f"Constructing splits for {dataset_name}"
-    )
-    print("-" * 60)
-
-    for stratum_name, stratum_df in grouped:
-        indices = (
-            stratum_df.index
-            .to_numpy(dtype=np.int64)
-            .copy()
-        )
-
-        rng.shuffle(
-            indices
-        )
-
-        group_size = len(
-            indices
-        )
-
-        test_count = allocate_test_count(
-            group_size=group_size,
-            test_fraction=TEST_FRACTION,
-            n_folds=N_FOLDS,
-        )
-
-        stratum_test_indices = (
-            indices[:test_count]
-        )
-
-        stratum_development_indices = (
-            indices[test_count:]
-        )
-
-        test_indices.extend(
-            stratum_test_indices.tolist()
-        )
-
-        rng.shuffle(
-            stratum_development_indices
-        )
-
-        stratum_fold_parts = np.array_split(
-            stratum_development_indices,
-            N_FOLDS,
-        )
-
-        for fold_number, fold_part in enumerate(
-            stratum_fold_parts
-        ):
-            fold_indices[
-                fold_number
-            ].extend(
-                fold_part.tolist()
-            )
-
-        fold_sizes = [
-            len(fold_part)
-            for fold_part in stratum_fold_parts
-        ]
-
-        print(
-            f"Stratum {stratum_name}: "
-            f"total={group_size}, "
-            f"test={test_count}, "
-            f"folds={fold_sizes}"
-        )
-
-    # Convert all index collections to NumPy arrays.
-    test_indices = np.asarray(
-        test_indices,
-        dtype=np.int64,
-    )
-
-    fold_indices = [
-        np.asarray(
-            indices,
-            dtype=np.int64,
-        )
-        for indices in fold_indices
-    ]
-
-    # Shuffle final row order inside each output split.
-    rng.shuffle(
-        test_indices
-    )
-
-    for indices in fold_indices:
-        rng.shuffle(
-            indices
-        )
-
-    # --------------------------------------------------------
-    # Validate the partition using row indices
-    # --------------------------------------------------------
-    validate_partition_indices(
-        original_row_count=len(df),
-        test_indices=test_indices,
-        fold_indices=fold_indices,
-        dataset_name=dataset_name,
-    )
-
-    # --------------------------------------------------------
-    # Construct output dataframes
-    # --------------------------------------------------------
-    test_df = (
-        df.iloc[test_indices]
-        .drop(
-            columns="_STRATIFICATION_KEY"
-        )
-        .reset_index(drop=True)
-    )
-
-    folds = []
-
-    for indices in fold_indices:
-        fold_df = (
-            df.iloc[indices]
-            .drop(
-                columns="_STRATIFICATION_KEY"
-            )
-            .reset_index(drop=True)
-        )
-
-        folds.append(
-            fold_df
-        )
-
-    return test_df, folds
-
-def validate_partition_indices(
-    original_row_count,
-    test_indices,
-    fold_indices,
-    dataset_name,
-):
-    """
-    Validate that test and fold index arrays form an exact partition of
-    the original dataframe.
-
-    Checks:
-      - total number of selected rows is correct;
-      - no row index appears more than once;
-      - no original row is missing;
-      - no invalid row index is present.
-    """
-    all_index_arrays = [
-        np.asarray(
-            test_indices,
-            dtype=np.int64,
-        ),
-        *[
-            np.asarray(
-                indices,
-                dtype=np.int64,
-            )
-            for indices in fold_indices
-        ],
-    ]
-
-    all_indices = np.concatenate(
-        all_index_arrays
-    )
-
-    # Total count check.
-    if len(all_indices) != original_row_count:
-        raise AssertionError(
-            f"{dataset_name}: partition contains "
-            f"{len(all_indices)} rows, but the original dataset "
-            f"contains {original_row_count} rows."
-        )
-
-    # Bounds check.
-    invalid_indices = all_indices[
-        (all_indices < 0)
-        | (all_indices >= original_row_count)
-    ]
-
-    if len(invalid_indices) > 0:
-        raise AssertionError(
-            f"{dataset_name}: invalid row indices were found: "
-            f"{invalid_indices[:20].tolist()}"
-        )
-
-    unique_indices, occurrence_counts = np.unique(
-        all_indices,
-        return_counts=True,
-    )
-
-    duplicated_indices = unique_indices[
-        occurrence_counts > 1
-    ]
-
-    if len(duplicated_indices) > 0:
-        raise AssertionError(
-            f"{dataset_name}: {len(duplicated_indices)} rows occur "
-            "in more than one split.\n"
-            f"First duplicated row indices: "
-            f"{duplicated_indices[:20].tolist()}"
-        )
-
-    expected_indices = np.arange(
-        original_row_count,
-        dtype=np.int64,
-    )
-
-    missing_indices = np.setdiff1d(
-        expected_indices,
-        unique_indices,
-    )
-
-    if len(missing_indices) > 0:
-        raise AssertionError(
-            f"{dataset_name}: {len(missing_indices)} rows are missing "
-            "from the test/fold partition.\n"
-            f"First missing row indices: "
-            f"{missing_indices[:20].tolist()}"
-        )
-
-    unexpected_indices = np.setdiff1d(
-        unique_indices,
-        expected_indices,
-    )
-
-    if len(unexpected_indices) > 0:
-        raise AssertionError(
-            f"{dataset_name}: unexpected row indices were found.\n"
-            f"First unexpected indices: "
-            f"{unexpected_indices[:20].tolist()}"
-        )
-
-    print(
-        f"{dataset_name}: partition validation passed. "
-        f"All {original_row_count} rows occur exactly once."
-    )
-
-
-def row_identity_set(df):
-    """
-    Create a row-level identity representation for validation.
-    """
-    normalized = df.copy()
-
-    for column in normalized.columns:
-        normalized[column] = (
-            normalized[column].map(
-                lambda value: (
-                    "<NA>"
-                    if pd.isna(value)
-                    else str(value)
-                )
-            )
-        )
-
-    return set(
-        map(
-            tuple,
-            normalized.to_numpy(),
-        )
-    )
-
-
-def validate_partition(
-    original_df,
-    test_df,
-    folds,
-    dataset_name,
-):
-    """
-    Validate that test and folds do not overlap and cover all rows.
-    """
-    split_dataframes = [
-        test_df
-    ] + folds
-
-    split_names = [
-        "test"
-    ] + [
-        f"fold{index}"
-        for index in range(
-            1,
-            N_FOLDS + 1,
-        )
-    ]
-
-    total_split_rows = sum(
-        len(split_df)
-        for split_df in split_dataframes
-    )
-
-    if total_split_rows != len(
-        original_df
-    ):
-        raise AssertionError(
-            f"{dataset_name}: split sizes sum to {total_split_rows}, "
-            f"but the original dataset contains {len(original_df)} rows."
-        )
-
-    identity_sets = [
-        row_identity_set(
-            split_df
-        )
-        for split_df in split_dataframes
-    ]
-
-    for i in range(
-        len(identity_sets)
-    ):
-        for j in range(
-            i + 1,
-            len(identity_sets),
-        ):
-            overlap = identity_sets[
-                i
-            ].intersection(
-                identity_sets[j]
-            )
-
-            if overlap:
-                raise AssertionError(
-                    f"{dataset_name}: overlap detected between "
-                    f"{split_names[i]} and {split_names[j]}."
-                )
-
-    union_set = set().union(
-        *identity_sets
-    )
-
-    original_set = row_identity_set(
-        original_df
-    )
-
-    if union_set != original_set:
-        raise AssertionError(
-            f"{dataset_name}: the union of test and folds does not "
-            "match the original cleaned dataset."
-        )
-
-
-def save_split_collection(
-    output_directory,
-    test_df,
-    folds,
-):
-    """
-    Save test.xlsx and fold1.xlsx through fold5.xlsx.
-    """
-    output_directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    test_df.to_excel(
-        output_directory
-        / "test.xlsx",
-        index=False,
-    )
-
-    for fold_number, fold_df in enumerate(
-        folds,
-        start=1,
-    ):
-        fold_df.to_excel(
-            output_directory
-            / f"fold{fold_number}.xlsx",
-            index=False,
-        )
-
-
-def concatenate_matching_splits(
-    tum_test,
-    tum_folds,
-    lmu_test,
-    lmu_folds,
-):
-    """
-    Build merged splits by concatenating corresponding TUM and LMU splits.
-    """
-    merged_test = pd.concat(
-        [
-            tum_test,
-            lmu_test,
-        ],
-        axis=0,
-        ignore_index=True,
-    )
-
-    merged_folds = []
-
-    for tum_fold, lmu_fold in zip(
-        tum_folds,
-        lmu_folds,
-    ):
-        merged_fold = pd.concat(
-            [
-                tum_fold,
-                lmu_fold,
-            ],
-            axis=0,
-            ignore_index=True,
-        )
-
-        merged_folds.append(
-            merged_fold
-        )
-
-    return (
-        merged_test,
-        merged_folds,
-    )
-
-# ============================================================
-# DATA-SIZE EXPERIMENT DATASETS
-# ============================================================
-
-def normalize_binary_label(value):
-    """
-    Normalize LABEL values only for balanced sampling.
-
-    The original LABEL values in the dataframe are NOT changed.
-    """
-    value = str(value).strip().lower()
-
-    mapping = {
-        "no event": 0,
-        "no_event": 0,
-        "noevent": 0,
-        "0": 0,
-        "pacer": 1,
-        "pacemaker": 1,
-        "1": 1,
-    }
-
-    if value not in mapping:
-        raise ValueError(
-            f"Unsupported LABEL value for data-size sampling: {value!r}"
-        )
-
-    return mapping[value]
-
-
-def attach_original_fold_number(
-    folds,
-):
-    """
-    Combine the five development folds while remembering which
-    original fold every row belongs to.
-
-    test.xlsx is never included.
-    """
-    parts = []
-
-    for fold_number, fold_df in enumerate(
-        folds,
-        start=1,
-    ):
-        part = fold_df.copy()
-
-        part["_ORIGINAL_FOLD"] = fold_number
-
-        parts.append(part)
-
-    development_df = pd.concat(
-        parts,
-        axis=0,
-        ignore_index=True,
-    )
-
-    development_df["_BINARY_LABEL"] = (
-        development_df[LABEL_COLUMN]
-        .map(normalize_binary_label)
-    )
-
-    return development_df
-
-
-def calculate_balanced_subset_size(
-    total_development_samples,
-    percentage,
-    n_folds,
-):
-    """
-    Determine a usable sample count for a percentage experiment.
-
-    Requirements:
-      1. Approximately matches the requested percentage.
-      2. Exactly balanced between labels.
-      3. Can be divided equally across all folds.
-      4. Every fold receives the same number from each label.
-
-    Therefore total sample count must be divisible by:
-
-        2 labels × n_folds
-
-    For 5 folds:
-        total must be divisible by 10.
-    """
-
-    requested = (
-        total_development_samples
-        * percentage
-        / 100.0
-    )
-
-    required_multiple = (
-        2 * n_folds
-    )
-
-    # Find the nearest valid multiple.
-    lower = (
-        int(requested)
-        // required_multiple
-        * required_multiple
-    )
-
-    upper = (
-        lower
-        + required_multiple
-    )
-
-    # Need at least one sample of each label in every fold.
-    lower = max(
-        lower,
-        required_multiple,
-    )
-
-    upper = max(
-        upper,
-        required_multiple,
-    )
-
-    if abs(lower - requested) <= abs(
-        upper - requested
-    ):
-        selected_total = lower
-    else:
-        selected_total = upper
-
-    return selected_total   
-
-
-def sample_balanced_development_subset(
-    folds,
-    percentage,
-    random_seed,
-    dataset_name,
-):
-    """
-    Create one balanced data-size experiment dataset.
-
-    The five original development folds are first combined.
-
-    Then:
-      1. A percentage-sized balanced subset is selected.
-      2. The selected subset is re-shuffled.
-      3. It is divided into five NEW equal-sized folds.
-      4. Every fold receives the same number of No Event
-         and Pacemaker samples.
-
-    The original fold membership is intentionally NOT preserved.
-
-    This is preferable for very small data-size experiments because
-    otherwise some folds can be empty or contain only one class.
-    """
-
-    # --------------------------------------------------------
-    # Combine all five original development folds
-    # --------------------------------------------------------
-    development_df = pd.concat(
-        folds,
-        axis=0,
-        ignore_index=True,
-        sort=False,
-    )
-
-    development_df = development_df.copy()
-
-    development_df["_BINARY_LABEL"] = (
-        development_df[
-            LABEL_COLUMN
-        ].map(
-            normalize_binary_label
-        )
-    )
-
-    total_development_samples = len(
-        development_df
-    )
-
-    # --------------------------------------------------------
-    # Determine valid subset size
-    # --------------------------------------------------------
-    target_total = calculate_balanced_subset_size(
-        total_development_samples=(
-            total_development_samples
-        ),
-        percentage=percentage,
-        n_folds=N_FOLDS,
-    )
-
-    samples_per_label = (
-        target_total // 2
-    )
-
-    samples_per_label_per_fold = (
-        samples_per_label
-        // N_FOLDS
-    )
-
-    samples_per_fold = (
-        target_total
-        // N_FOLDS
-    )
-
-    # --------------------------------------------------------
-    # Separate labels
-    # --------------------------------------------------------
-    label_0_df = (
-        development_df.loc[
-            development_df[
-                "_BINARY_LABEL"
-            ]
-            == 0
-        ]
-        .copy()
-    )
-
-    label_1_df = (
-        development_df.loc[
-            development_df[
-                "_BINARY_LABEL"
-            ]
-            == 1
-        ]
-        .copy()
-    )
-
-    available_per_label = min(
-        len(label_0_df),
-        len(label_1_df),
-    )
-
-    if samples_per_label > available_per_label:
-        raise ValueError(
-            f"{dataset_name} {percentage}%: "
-            f"need {samples_per_label} samples per label, "
-            f"but only {available_per_label} are available."
-        )
-
-    # --------------------------------------------------------
-    # Sample equal numbers from the two labels
-    # --------------------------------------------------------
-    sampled_label_0 = (
-        label_0_df.sample(
-            n=samples_per_label,
-            replace=False,
-            random_state=(
-                random_seed
-                + percentage * 100
-                + 1
-            ),
-        )
-        .reset_index(drop=True)
-    )
-
-    sampled_label_1 = (
-        label_1_df.sample(
-            n=samples_per_label,
-            replace=False,
-            random_state=(
-                random_seed
-                + percentage * 100
-                + 2
-            ),
-        )
-        .reset_index(drop=True)
-    )
-
-    # --------------------------------------------------------
-    # Shuffle each class independently
-    # --------------------------------------------------------
-    sampled_label_0 = (
-        sampled_label_0.sample(
-            frac=1.0,
-            random_state=(
-                random_seed
-                + percentage * 1000
-                + 10
-            ),
-        )
-        .reset_index(drop=True)
-    )
-
-    sampled_label_1 = (
-        sampled_label_1.sample(
-            frac=1.0,
-            random_state=(
-                random_seed
-                + percentage * 1000
-                + 20
-            ),
-        )
-        .reset_index(drop=True)
-    )
-
-    # --------------------------------------------------------
-    # Build five equal folds
-    #
-    # Every fold receives exactly:
-    #
-    #   samples_per_label_per_fold No Event
-    #   samples_per_label_per_fold Pacemaker
-    #
-    # --------------------------------------------------------
-    percentage_folds = []
-
-    for fold_index in range(
-        N_FOLDS
-    ):
-        start = (
-            fold_index
-            * samples_per_label_per_fold
-        )
-
-        end = (
-            start
-            + samples_per_label_per_fold
-        )
-
-        fold_label_0 = (
-            sampled_label_0.iloc[
-                start:end
-            ]
-            .copy()
-        )
-
-        fold_label_1 = (
-            sampled_label_1.iloc[
-                start:end
-            ]
-            .copy()
-        )
-
-        fold_df = pd.concat(
-            [
-                fold_label_0,
-                fold_label_1,
-            ],
-            axis=0,
-            ignore_index=True,
-        )
-
-        # Shuffle row order inside the fold.
-        fold_df = (
-            fold_df.sample(
-                frac=1.0,
-                random_state=(
-                    random_seed
-                    + percentage * 10000
-                    + fold_index
-                ),
-            )
-            .drop(
-                columns=[
-                    "_BINARY_LABEL",
-                ]
-            )
-            .reset_index(drop=True)
-        )
-
-        percentage_folds.append(
-            fold_df
-        )
-
-    # --------------------------------------------------------
-    # Validation
-    # --------------------------------------------------------
-    fold_sizes = [
-        len(fold)
-        for fold in percentage_folds
-    ]
-
-    if len(
-        set(fold_sizes)
-    ) != 1:
-        raise AssertionError(
-            f"{dataset_name} {percentage}%: "
-            f"fold sizes are not equal: {fold_sizes}"
-        )
-
-    for fold_number, fold_df in enumerate(
-        percentage_folds,
-        start=1,
-    ):
-        fold_labels = (
-            fold_df[
-                LABEL_COLUMN
-            ]
-            .map(
-                normalize_binary_label
-            )
-        )
-
-        label_counts = (
-            fold_labels
-            .value_counts()
-            .to_dict()
-        )
-
-        count_0 = int(
-            label_counts.get(
-                0,
-                0,
-            )
-        )
-
-        count_1 = int(
-            label_counts.get(
-                1,
-                0,
-            )
-        )
-
-        if count_0 != count_1:
-            raise AssertionError(
-                f"{dataset_name} {percentage}% "
-                f"fold{fold_number} is not balanced: "
-                f"No Event={count_0}, "
-                f"Pacemaker={count_1}"
-            )
-
-    actual_total = sum(
-        fold_sizes
-    )
-
-    actual_percentage = (
-        actual_total
-        / total_development_samples
-        * 100.0
-    )
-
-    print()
-    print("=" * 70)
-    print(
-        f"{dataset_name} — "
-        f"{percentage}% DATA-SIZE DATASET"
-    )
-    print("=" * 70)
-
-    print(
-        f"Original development samples: "
-        f"{total_development_samples}"
-    )
-
-    print(
-        f"Requested percentage:          "
-        f"{percentage}%"
-    )
-
-    print(
-        f"Selected samples:              "
-        f"{actual_total}"
-    )
-
-    print(
-        f"Actual percentage:             "
-        f"{actual_percentage:.2f}%"
-    )
-
-    print(
-        f"No Event samples:              "
-        f"{samples_per_label}"
-    )
-
-    print(
-        f"Pacemaker samples:             "
-        f"{samples_per_label}"
-    )
-
-    print(
-        f"Samples per fold:              "
-        f"{samples_per_fold}"
-    )
-
-    print(
-        f"No Event per fold:             "
-        f"{samples_per_label_per_fold}"
-    )
-
-    print(
-        f"Pacemaker per fold:            "
-        f"{samples_per_label_per_fold}"
-    )
-
-    print(
-        f"Fold sizes:                    "
-        f"{fold_sizes}"
-    )
-
-    return percentage_folds
-
-def verify_balanced_labels(
-    folds,
-    dataset_name,
-    percentage,
-):
-    """
-    Verify that the union of the five percentage folds contains
-    exactly the same number of samples for both labels.
-    """
-    combined = pd.concat(
-        folds,
-        axis=0,
-        ignore_index=True,
-    )
-
-    labels = (
-        combined[LABEL_COLUMN]
-        .map(normalize_binary_label)
-    )
-
-    counts = labels.value_counts().to_dict()
-
-    count_0 = int(
-        counts.get(0, 0)
-    )
-
-    count_1 = int(
-        counts.get(1, 0)
-    )
-
-    if count_0 != count_1:
-        raise AssertionError(
-            f"{dataset_name} {percentage}% is not label-balanced: "
-            f"No Event={count_0}, Pacemaker={count_1}"
-        )
-
-    print(
-        f"{dataset_name} {percentage}% balance verified: "
-        f"{count_0} No Event + {count_1} Pacemaker."
-    )
-
-
-def verify_percentage_subset_of_original_folds(
-    percentage_folds,
-    original_folds,
-    dataset_name,
-    percentage,
-):
-    """
-    Verify that every sample in each percentage fold comes from
-    the corresponding original fold.
-
-    Validation is performed using normalized patient IDs rather than
-    whole-row string comparison. This avoids false mismatches caused
-    by pandas dtype changes such as 123 vs 123.0.
-    """
-
-    for fold_number in range(N_FOLDS):
-
-        percentage_fold = percentage_folds[
-            fold_number
-        ]
-
-        original_fold = original_folds[
-            fold_number
-        ]
+def make_missingness_audit(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    """Missingness rates in the FINAL model cohort, including rates by outcome."""
+    y = df[LABEL_COLUMN].map(normalize_binary_label)
+    rows: List[Dict[str, object]] = []
 
-        # Empty percentage folds are valid for very small percentages.
-        if len(percentage_fold) == 0:
-            print(
-                f"{dataset_name} {percentage}% fold{fold_number + 1}: "
-                "empty — valid."
-            )
+    for column in df.columns:
+        if column in {ID_COLUMN, LABEL_COLUMN}:
             continue
 
-        percentage_id_column = find_id_column(
-            percentage_fold,
-            ID_COLUMN,
+        missing = df[column].isna()
+        label0 = y == 0
+        label1 = y == 1
+
+        rate_all = float(missing.mean())
+        rate0 = float(missing[label0].mean()) if label0.any() else float("nan")
+        rate1 = float(missing[label1].mean()) if label1.any() else float("nan")
+        gap = (
+            abs(rate1 - rate0)
+            if np.isfinite(rate0) and np.isfinite(rate1)
+            else float("nan")
         )
 
-        original_id_column = find_id_column(
-            original_fold,
-            ID_COLUMN,
-        )
+        rows.append({
+            "dataset": dataset_name,
+            "feature": column,
+            "missing_n": int(missing.sum()),
+            "missing_rate": rate_all,
+            "missing_percent": 100.0 * rate_all,
+            "missing_rate_no_event": rate0,
+            "missing_percent_no_event": 100.0 * rate0,
+            "missing_rate_pacemaker": rate1,
+            "missing_percent_pacemaker": 100.0 * rate1,
+            "absolute_label_missingness_gap": gap,
+            "absolute_label_missingness_gap_percent": 100.0 * gap,
+            "high_missingness_warning": bool(
+                rate_all >= MISSINGNESS_WARNING_THRESHOLD
+            ),
+            "label_missingness_warning": bool(
+                np.isfinite(gap) and gap >= LABEL_MISSINGNESS_GAP_WARNING
+            ),
+        })
 
-        percentage_ids = set(
-            percentage_fold[
-                percentage_id_column
-            ]
-            .map(normalize_identifier)
-            .dropna()
-            .tolist()
-        )
-
-        original_ids = set(
-            original_fold[
-                original_id_column
-            ]
-            .map(normalize_identifier)
-            .dropna()
-            .tolist()
-        )
-
-        invalid_ids = sorted(
-            percentage_ids
-            - original_ids
-        )
-
-        if invalid_ids:
-            raise AssertionError(
-                f"{dataset_name} {percentage}% fold"
-                f"{fold_number + 1} contains IDs not present "
-                f"in the corresponding original fold.\n"
-                f"Invalid IDs: {invalid_ids[:20]}"
-            )
-
-        # Also make sure IDs were not somehow duplicated.
-        normalized_percentage_ids = (
-            percentage_fold[
-                percentage_id_column
-            ]
-            .map(normalize_identifier)
-            .dropna()
-        )
-
-        duplicate_mask = (
-            normalized_percentage_ids
-            .duplicated(keep=False)
-        )
-
-        if duplicate_mask.any():
-            duplicate_ids = (
-                normalized_percentage_ids[
-                    duplicate_mask
-                ]
-                .drop_duplicates()
-                .tolist()
-            )
-
-            raise AssertionError(
-                f"{dataset_name} {percentage}% fold"
-                f"{fold_number + 1} contains duplicate IDs:\n"
-                f"{duplicate_ids[:20]}"
-            )
-
-        print(
-            f"{dataset_name} {percentage}% fold{fold_number + 1}: "
-            f"{len(percentage_fold)} samples verified."
-        )
-
-    print(
-        f"{dataset_name} {percentage}%: "
-        "all selected samples belong to their original folds."
+    return pd.DataFrame(rows).sort_values(
+        ["label_missingness_warning", "absolute_label_missingness_gap", "missing_rate"],
+        ascending=[False, False, False],
     )
 
-def save_data_size_split_collection(
-    output_directory,
-    test_df,
-    folds,
-):
+
+def make_dropped_feature_missingness_report(
+    df: pd.DataFrame,
+    dataset_name: str,
+) -> pd.DataFrame:
+    """Capture outcome-specific missingness BEFORE configured columns are dropped."""
+    y = df[LABEL_COLUMN].map(normalize_binary_label)
+    rows: List[Dict[str, object]] = []
+
+    for column in DROP_FEATURE_COLUMNS:
+        if column not in df.columns:
+            raise ValueError(
+                f"{dataset_name}: dropped-feature audit cannot find {column!r}."
+            )
+
+        missing = df[column].isna()
+        no_event = y == 0
+        pacemaker = y == 1
+
+        rows.append({
+            "dataset": dataset_name,
+            "feature": column,
+            "n_total": int(len(df)),
+            "overall_missing_n": int(missing.sum()),
+            "overall_missing_percent": 100.0 * float(missing.mean()),
+            "no_event_n": int(no_event.sum()),
+            "no_event_missing_n": int(missing[no_event].sum()),
+            "no_event_missing_percent": (
+                100.0 * float(missing[no_event].mean())
+                if no_event.any() else float("nan")
+            ),
+            "pacemaker_n": int(pacemaker.sum()),
+            "pacemaker_missing_n": int(missing[pacemaker].sum()),
+            "pacemaker_missing_percent": (
+                100.0 * float(missing[pacemaker].mean())
+                if pacemaker.any() else float("nan")
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def make_numeric_site_audit(
+    tum_df: pd.DataFrame,
+    lmu_df: pd.DataFrame,
+) -> pd.DataFrame:
+    rows: List[Dict[str, object]] = []
+    ignored = {ID_COLUMN, LABEL_COLUMN}
+
+    for column in tum_df.columns:
+        if column in ignored:
+            continue
+
+        tum_values = pd.to_numeric(tum_df[column], errors="coerce")
+        lmu_values = pd.to_numeric(lmu_df[column], errors="coerce")
+
+        t = tum_values.dropna().to_numpy(dtype=float)
+        l = lmu_values.dropna().to_numpy(dtype=float)
+
+        if len(t) == 0 or len(l) == 0:
+            smd = float("nan")
+        else:
+            pooled_sd = (
+                math.sqrt((np.var(t, ddof=1) + np.var(l, ddof=1)) / 2.0)
+                if len(t) > 1 and len(l) > 1
+                else 0.0
+            )
+            smd = (
+                (float(np.mean(t)) - float(np.mean(l))) / pooled_sd
+                if pooled_sd > 0
+                else 0.0
+            )
+
+        rows.append({
+            "feature": column,
+            "tum_n": int(tum_values.notna().sum()),
+            "lmu_n": int(lmu_values.notna().sum()),
+            "tum_missing_rate": float(tum_values.isna().mean()),
+            "lmu_missing_rate": float(lmu_values.isna().mean()),
+            "tum_mean": float(np.mean(t)) if len(t) else float("nan"),
+            "lmu_mean": float(np.mean(l)) if len(l) else float("nan"),
+            "tum_std": float(np.std(t, ddof=1)) if len(t) > 1 else float("nan"),
+            "lmu_std": float(np.std(l, ddof=1)) if len(l) > 1 else float("nan"),
+            "standardized_mean_difference_tum_minus_lmu": smd,
+            "absolute_smd": abs(smd) if np.isfinite(smd) else float("nan"),
+        })
+
+    return pd.DataFrame(rows).sort_values("absolute_smd", ascending=False)
+
+
+def _set_audit_plot_fonts() -> None:
+    plt.rcParams.update({
+        "font.size": BASE_FONTSIZE,
+        "axes.titlesize": TITLE_FONTSIZE,
+        "axes.labelsize": LABEL_FONTSIZE,
+        "xtick.labelsize": TICK_FONTSIZE,
+        "ytick.labelsize": TICK_FONTSIZE,
+        "legend.fontsize": LEGEND_FONTSIZE,
+        "font.family": "sans-serif",
+    })
+
+
+def plot_top_missingness(
+    df: pd.DataFrame,
+    dataset_name: str,
+    output_path: Path,
+    top_n: int = TOP_MISSINGNESS_COLUMNS,
+) -> pd.DataFrame:
     """
-    Save the percentage-specific folds together with the SAME
-    original fixed test.xlsx.
+    Plot the top-N missing features AFTER all configured feature drops and after
+    ECG columns have been attached. ID and LABEL are excluded.
     """
-    output_directory.mkdir(
-        parents=True,
-        exist_ok=True,
+    feature_columns = [
+        column for column in df.columns
+        if column not in {ID_COLUMN, LABEL_COLUMN}
+    ]
+
+    table = pd.DataFrame({
+        "feature": feature_columns,
+        "missing_percent": [
+            100.0 * float(df[column].isna().mean())
+            for column in feature_columns
+        ],
+        "missing_n": [
+            int(df[column].isna().sum())
+            for column in feature_columns
+        ],
+    }).sort_values(
+        ["missing_percent", "feature"],
+        ascending=[False, True],
+    ).head(top_n)
+
+    # Plot from lowest to highest so the largest bar appears at the top.
+    plot_table = table.sort_values("missing_percent", ascending=True)
+
+    _set_audit_plot_fonts()
+    fig, ax = plt.subplots(figsize=MISSINGNESS_FIGSIZE)
+    y = np.arange(len(plot_table))
+    ax.barh(
+        y,
+        plot_table["missing_percent"],
+        color="0.65",
+        edgecolor="black",
+        linewidth=1.0,
     )
+    ax.set_yticks(y)
+    ax.set_yticklabels(plot_table["feature"])
+    ax.set_xlabel("Missing values (%)")
+    ax.set_ylabel("Feature")
+    ax.set_title(f"{dataset_name} Missingness — Top {min(top_n, len(table))}")
+    ax.set_xlim(0, 100)
+    ax.grid(axis="x", linestyle=":", linewidth=1.0, color="0.82")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
-    # Same fixed test set for every percentage.
-    test_df.to_excel(
-        output_directory
-        / "test.xlsx",
-        index=False,
-    )
-
-    for fold_number, fold_df in enumerate(
-        folds,
-        start=1,
-    ):
-        fold_df.to_excel(
-            output_directory
-            / f"fold{fold_number}.xlsx",
-            index=False,
+    for position, value in enumerate(plot_table["missing_percent"].to_numpy()):
+        ax.text(
+            min(value + 1.0, 98.0),
+            position,
+            f"{value:.1f}%",
+            va="center",
+            fontsize=max(TICK_FONTSIZE - 2, 10),
         )
 
-
-def create_all_data_size_experiment_datasets(
-    tum_test,
-    tum_folds,
-    lmu_test,
-    lmu_folds,
-):
-    """
-    Generate:
-
-        1%
-        2%
-        5%
-        10%
-        20%
-        50%
-
-    for TUM, LMU, and merged.
-
-    Guarantees:
-      - same original test set for every percentage;
-      - balanced LABEL distribution for TUM and LMU;
-      - merged test = TUM test + LMU test;
-      - merged foldX = TUM foldX + LMU foldX.
-    """
-    print()
-    print("=" * 80)
-    print("CREATING DATA-SIZE EXPERIMENT DATASETS")
-    print("=" * 80)
-
-    for percentage in DATA_SIZE_PERCENTAGES:
-
-        # ----------------------------------------------------
-        # TUM subset
-        # ----------------------------------------------------
-        tum_percentage_folds = (
-            sample_balanced_development_subset(
-                folds=tum_folds,
-                percentage=percentage,
-                random_seed=(
-                    RANDOM_SEED
-                ),
-                dataset_name="TUM",
-            )
-        )
-
-        # ----------------------------------------------------
-        # LMU subset
-        # ----------------------------------------------------
-        lmu_percentage_folds = (
-            sample_balanced_development_subset(
-                folds=lmu_folds,
-                percentage=percentage,
-                random_seed=(
-                    RANDOM_SEED + 1
-                ),
-                dataset_name="LMU",
-            )
-        )
-
-        verify_balanced_labels(
-            folds=tum_percentage_folds,
-            dataset_name="TUM",
-            percentage=percentage,
-        )
-
-        verify_balanced_labels(
-            folds=lmu_percentage_folds,
-            dataset_name="LMU",
-            percentage=percentage,
-        )
-
-        # ----------------------------------------------------
-        # Merged subset
-        #
-        # IMPORTANT:
-        # merged foldX = TUM foldX + LMU foldX
-        # ----------------------------------------------------
-        merged_percentage_folds = []
-
-        for fold_index in range(
-            N_FOLDS
-        ):
-            merged_fold = pd.concat(
-                [
-                    tum_percentage_folds[
-                        fold_index
-                    ],
-                    lmu_percentage_folds[
-                        fold_index
-                    ],
-                ],
-                axis=0,
-                ignore_index=True,
-                sort=False,
-            )
-
-            merged_percentage_folds.append(
-                merged_fold
-            )
-
-        # Same fixed merged test set used for every percentage.
-        merged_test = pd.concat(
-            [
-                tum_test,
-                lmu_test,
-            ],
-            axis=0,
-            ignore_index=True,
-            sort=False,
-        )
-
-        # ----------------------------------------------------
-        # Verify merged folds
-        # ----------------------------------------------------
-        for fold_index in range(
-            N_FOLDS
-        ):
-            verify_merged_split(
-                tum_df=(
-                    tum_percentage_folds[
-                        fold_index
-                    ]
-                ),
-                lmu_df=(
-                    lmu_percentage_folds[
-                        fold_index
-                    ]
-                ),
-                merged_df=(
-                    merged_percentage_folds[
-                        fold_index
-                    ]
-                ),
-                split_name=(
-                    f"{percentage}% merged "
-                    f"fold{fold_index + 1}"
-                ),
-            )
-
-        verify_merged_split(
-            tum_df=tum_test,
-            lmu_df=lmu_test,
-            merged_df=merged_test,
-            split_name=(
-                f"{percentage}% merged test"
-            ),
-        )
-
-        # ----------------------------------------------------
-        # Output paths
-        # ----------------------------------------------------
-        percentage_root = (
-            DATA_SIZE_OUTPUT_ROOT
-            / f"{percentage}_percent"
-        )
-
-        # TUM
-        save_data_size_split_collection(
-            output_directory=(
-                percentage_root
-                / "tum"
-            ),
-            test_df=tum_test,
-            folds=tum_percentage_folds,
-        )
-
-        # LMU
-        save_data_size_split_collection(
-            output_directory=(
-                percentage_root
-                / "lmu"
-            ),
-            test_df=lmu_test,
-            folds=lmu_percentage_folds,
-        )
-
-        # MERGED
-        save_data_size_split_collection(
-            output_directory=(
-                percentage_root
-                / "merged"
-            ),
-            test_df=merged_test,
-            folds=merged_percentage_folds,
-        )
-
-        print()
-        print(
-            f"{percentage}% datasets saved under:"
-        )
-        print(
-            percentage_root
-        )
-
-
-# ============================================================
-# REPORTING
-# ============================================================
-
-def distribution_table(df):
-    """
-    Return LABEL × SEX counts for a split.
-    """
-    table = (
-        df.groupby(
-            [
-                LABEL_COLUMN,
-                SEX_COLUMN,
-            ],
-            dropna=False,
-        )
-        .size()
-        .reset_index(
-            name="COUNT"
-        )
-        .sort_values(
-            [
-                LABEL_COLUMN,
-                SEX_COLUMN,
-            ],
-            kind="stable",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    table["PERCENT"] = (
-        table["COUNT"]
-        / len(df)
-        * 100
-    ).round(2)
-
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=PLOT_DPI, bbox_inches="tight")
+    plt.close(fig)
     return table
 
 
-def print_split_summary(
-    dataset_name,
-    test_df,
-    folds,
-):
+def benjamini_hochberg(p_values: Sequence[float]) -> np.ndarray:
+    """Benjamini-Hochberg FDR correction with NaN-safe handling."""
+    p = np.asarray(p_values, dtype=float)
+    q = np.full(p.shape, np.nan, dtype=float)
+    valid = np.isfinite(p)
+
+    if not np.any(valid):
+        return q
+
+    valid_indices = np.flatnonzero(valid)
+    pv = p[valid]
+    order = np.argsort(pv)
+    ranked = pv[order]
+    m = len(ranked)
+
+    adjusted = ranked * m / np.arange(1, m + 1, dtype=float)
+    adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
+    adjusted = np.clip(adjusted, 0.0, 1.0)
+
+    original_order_adjusted = np.empty_like(adjusted)
+    original_order_adjusted[order] = adjusted
+    q[valid_indices] = original_order_adjusted
+    return q
+
+
+def run_feature_significance_analysis(
+    df: pd.DataFrame,
+    dataset_name: str,
+    output_directory: Path,
+) -> pd.DataFrame:
     """
-    Print split sizes and LABEL × SEX distributions.
+    Reproduce the project's No Event vs Pacemaker significance pipeline:
+      - numeric prediction features only (ID/LABEL excluded),
+      - two-sided Mann-Whitney U per feature,
+      - Benjamini-Hochberg FDR correction,
+      - ranked q-value plot on a logarithmic y-axis.
     """
-    print()
-    print("=" * 80)
-    print(
-        f"{dataset_name} SPLIT SUMMARY"
-    )
-    print("=" * 80)
+    y = df[LABEL_COLUMN].map(normalize_binary_label)
+    rows: List[Dict[str, object]] = []
 
-    all_splits = [
-        (
-            "test",
-            test_df,
-        )
-    ] + [
-        (
-            f"fold{index}",
-            fold,
-        )
-        for index, fold in enumerate(
-            folds,
-            start=1,
-        )
-    ]
+    for column in df.columns:
+        if column in {ID_COLUMN, LABEL_COLUMN}:
+            continue
 
-    for split_name, split_df in all_splits:
-        print()
-        print(
-            f"{split_name}: "
-            f"{len(split_df)} samples"
-        )
+        values = pd.to_numeric(df[column], errors="coerce")
+        no_event = values.loc[y == 0].dropna().to_numpy(dtype=float)
+        pacemaker = values.loc[y == 1].dropna().to_numpy(dtype=float)
 
-        print(
-            distribution_table(
-                split_df
-            ).to_string(
-                index=False
+        if len(no_event) == 0 or len(pacemaker) == 0:
+            statistic = float("nan")
+            p_value = float("nan")
+            rank_biserial = float("nan")
+        else:
+            result = mannwhitneyu(
+                no_event,
+                pacemaker,
+                alternative="two-sided",
+                method="auto",
             )
+            statistic = float(result.statistic)
+            p_value = float(result.pvalue)
+            rank_biserial = (
+                2.0 * statistic / (len(no_event) * len(pacemaker)) - 1.0
+            )
+
+        rows.append({
+            "Feature": column,
+            "No_Event_N": int(len(no_event)),
+            "Pacemaker_N": int(len(pacemaker)),
+            "No_Event_Median": (
+                float(np.median(no_event)) if len(no_event) else float("nan")
+            ),
+            "Pacemaker_Median": (
+                float(np.median(pacemaker)) if len(pacemaker) else float("nan")
+            ),
+            "MWU_Statistic": statistic,
+            "MWU_p": p_value,
+            "Rank_Biserial_NoEvent_vs_Pacemaker": rank_biserial,
+        })
+
+    result_table = pd.DataFrame(rows)
+    result_table["MWU_q"] = benjamini_hochberg(result_table["MWU_p"].to_numpy())
+    result_table["Significant_FDR_0.05"] = (
+        result_table["MWU_q"] <= SIGNIFICANCE_ALPHA_FDR
+    )
+    result_table = result_table.sort_values(
+        ["MWU_q", "MWU_p", "Feature"],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    output_directory.mkdir(parents=True, exist_ok=True)
+    csv_path = output_directory / "summary_all_features.csv"
+    result_table.to_csv(csv_path, index=False)
+
+    plot_table = result_table.loc[result_table["MWU_q"].notna()].copy()
+    _set_audit_plot_fonts()
+    fig, ax = plt.subplots(figsize=SIGNIFICANCE_FIGSIZE)
+
+    if len(plot_table) > 0:
+        ranks = np.arange(1, len(plot_table) + 1)
+        q_for_plot = np.clip(
+            plot_table["MWU_q"].to_numpy(dtype=float),
+            1e-12,
+            1.0,
+        )
+        ax.plot(
+            ranks,
+            q_for_plot,
+            marker="o",
+            markersize=6,
+            linewidth=2.2,
+            color="0.30",
         )
 
+        significant_count = int(
+            (plot_table["MWU_q"] <= SIGNIFICANCE_ALPHA_FDR).sum()
+        )
+        if significant_count > 0 and significant_count < len(plot_table):
+            ax.axvline(
+                significant_count + 0.5,
+                color="0.55",
+                linestyle=":",
+                linewidth=2.0,
+                label=f"Significant features: {significant_count}",
+            )
+        elif significant_count > 0:
+            # All features significant; keep the annotation without a boundary.
+            ax.text(
+                0.98,
+                0.06,
+                f"Significant features: {significant_count}",
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+            )
 
-def verify_merged_split(
-    tum_df,
-    lmu_df,
-    merged_df,
-    split_name,
-):
-    """
-    Verify that a merged split exactly equals the concatenation of
-    its corresponding TUM and LMU splits, including duplicate rows.
-    """
-    expected_df = pd.concat(
-        [
-            tum_df,
-            lmu_df,
-        ],
-        axis=0,
+        ax.set_xlim(0.5, len(plot_table) + 0.5)
+    else:
+        significant_count = 0
+        ax.text(
+            0.5,
+            0.5,
+            "No valid numeric features",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+        )
+
+    ax.axhline(
+        SIGNIFICANCE_ALPHA_FDR,
+        color="0.15",
+        linestyle="--",
+        linewidth=2.2,
+        label=f"FDR = {SIGNIFICANCE_ALPHA_FDR:.2f}",
+    )
+    ax.set_yscale("log")
+    ax.set_xlabel("Features ranked by FDR-adjusted p-value")
+    ax.set_ylabel("FDR-adjusted p-value (q)")
+    ax.set_title(f"{dataset_name} Feature Significance (FDR)")
+    ax.grid(axis="y", linestyle=":", linewidth=1.0, color="0.80")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(
+        output_directory / "feature_significance_fdr.png",
+        dpi=PLOT_DPI,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+    significant = result_table.loc[
+        result_table["MWU_q"] <= SIGNIFICANCE_ALPHA_FDR
+    ]
+    print(
+        f"{dataset_name}: {len(significant)} features significant after "
+        f"BH-FDR <= {SIGNIFICANCE_ALPHA_FDR:.2f}."
+    )
+    if len(significant) > 0:
+        print(
+            significant[
+                ["Feature", "MWU_p", "MWU_q", "No_Event_Median", "Pacemaker_Median"]
+            ].to_string(index=False)
+        )
+
+    return result_table
+
+
+def save_audits(
+    tum_df: pd.DataFrame,
+    lmu_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+    change_log: pd.DataFrame,
+    dropped_feature_missingness: pd.DataFrame,
+) -> Dict[str, pd.DataFrame]:
+    """Save all final-cohort audits and the requested plots."""
+    AUDIT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+    datasets = {
+        "TUM": tum_df,
+        "LMU": lmu_df,
+        "MERGED": merged_df,
+    }
+
+    missingness_tables = {
+        name: make_missingness_audit(dataframe, name)
+        for name, dataframe in datasets.items()
+    }
+    missingness_all = pd.concat(
+        list(missingness_tables.values()),
         ignore_index=True,
-        sort=False,
     )
-
-    if len(merged_df) != len(expected_df):
-        raise AssertionError(
-            f"{split_name}: expected {len(expected_df)} rows, "
-            f"but found {len(merged_df)}."
-        )
-
-    # Align column order before comparison.
-    expected_df = expected_df.reindex(
-        columns=merged_df.columns
-    )
-
-    try:
-        pd.testing.assert_frame_equal(
-            merged_df.reset_index(drop=True),
-            expected_df.reset_index(drop=True),
-            check_dtype=False,
-            check_like=False,
-        )
-
-    except AssertionError as error:
-        raise AssertionError(
-            f"{split_name}: merged dataframe does not exactly equal "
-            f"TUM + LMU.\n{error}"
-        ) from error
-
-    print(
-        f"{split_name}: verified as exact TUM + LMU concatenation."
-    )
-
-
-def print_dataset_statistics(
-    df,
-    dataset_name,
-):
-    """
-    Print sample, SEX, LABEL, and LABEL × SEX counts.
-    """
-    print()
-    print("=" * 80)
-    print(
-        f"{dataset_name} DATASET STATISTICS"
-    )
-    print("=" * 80)
-
-    total_samples = len(
-        df
-    )
-
-    print(
-        f"Total samples: {total_samples}"
-    )
-
-    print()
-    print("SEX distribution")
-    print("-" * 40)
-
-    sex_counts = df[
-        SEX_COLUMN
-    ].value_counts(
-        dropna=False,
-        sort=False,
-    )
-
-    for sex_value, count in sex_counts.items():
-        percentage = (
-            100 * count / total_samples
-            if total_samples
-            else 0
-        )
-
-        print(
-            f"SEX={sex_value}: "
-            f"{count} samples "
-            f"({percentage:.2f}%)"
-        )
-
-    print()
-    print("LABEL distribution")
-    print("-" * 40)
-
-    label_counts = df[
-        LABEL_COLUMN
-    ].value_counts(
-        dropna=False,
-        sort=False,
-    )
-
-    for label_value, count in label_counts.items():
-        percentage = (
-            100 * count / total_samples
-            if total_samples
-            else 0
-        )
-
-        print(
-            f"LABEL={label_value}: "
-            f"{count} samples "
-            f"({percentage:.2f}%)"
-        )
-
-    print()
-    print("LABEL × SEX distribution")
-    print("-" * 40)
-
-    joint_counts = (
-        df.groupby(
-            [
-                LABEL_COLUMN,
-                SEX_COLUMN,
-            ],
-            dropna=False,
-        )
-        .size()
-        .reset_index(
-            name="COUNT"
-        )
-        .sort_values(
-            [
-                LABEL_COLUMN,
-                SEX_COLUMN,
-            ],
-            kind="stable",
-        )
-    )
-
-    for _, row in joint_counts.iterrows():
-        count = int(
-            row["COUNT"]
-        )
-
-        percentage = (
-            100 * count / total_samples
-            if total_samples
-            else 0
-        )
-
-        print(
-            f"LABEL={row[LABEL_COLUMN]}, "
-            f"SEX={row[SEX_COLUMN]}: "
-            f"{count} samples "
-            f"({percentage:.2f}%)"
-        )
-
-    print()
-    print("ECG interval availability")
-    print("-" * 40)
-
-    print(
-        f"QRSADM available: "
-        f"{int(df[QRS_COLUMN].notna().sum())}"
-    )
-
-    print(
-        f"PQADM available:  "
-        f"{int(df[PQ_COLUMN].notna().sum())}"
-    )
-
-    print(
-        f"Both available:   "
-        f"{int(
-            (
-                df[QRS_COLUMN].notna()
-                & df[PQ_COLUMN].notna()
-            ).sum()
-        )}"
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-    print("=" * 80)
-    print("DATASET CLEANING AND FIXED SPLIT GENERATION")
-    print("=" * 80)
-
-    # --------------------------------------------------------
-    # 1. Load primary TUM and LMU datasets
-    # --------------------------------------------------------
-    if not TUM_EXCEL_PATH.exists():
-        raise FileNotFoundError(
-            f"TUM Excel file does not exist: "
-            f"{TUM_EXCEL_PATH}"
-        )
-
-    if not LMU_EXCEL_PATH.exists():
-        raise FileNotFoundError(
-            f"LMU Excel file does not exist: "
-            f"{LMU_EXCEL_PATH}"
-        )
-
-    tum_df = pd.read_excel(
-        TUM_EXCEL_PATH
-    )
-
-    lmu_df = pd.read_excel(
-        LMU_EXCEL_PATH
-    )
-
-    validate_required_columns(
-        tum_df,
-        "TUM",
-    )
-
-    validate_required_columns(
-        lmu_df,
-        "LMU",
-    )
-
-    tum_id_column = find_id_column(
-        tum_df,
-        ID_COLUMN,
-    )
-
-    lmu_id_column = find_id_column(
-        lmu_df,
-        ID_COLUMN,
-    )
-
-    print(
-        f"TUM ID column: {tum_id_column}"
-    )
-
-    print(
-        f"LMU ID column: {lmu_id_column}"
-    )
-
-    # --------------------------------------------------------
-    # 2. Find available images
-    # --------------------------------------------------------
-    image_ids = collect_image_identifiers(
-        IMAGE_ROOT
-    )
-
-    # --------------------------------------------------------
-    # 3. Remove rows without corresponding images
-    # --------------------------------------------------------
-    tum_cleaned, tum_removed = (
-        clean_dataframe_using_images(
-            df=tum_df,
-            image_ids=image_ids,
-            id_column=tum_id_column,
-            dataset_name="TUM",
-        )
-    )
-
-    lmu_cleaned, lmu_removed = (
-        clean_dataframe_using_images(
-            df=lmu_df,
-            image_ids=image_ids,
-            id_column=lmu_id_column,
-            dataset_name="LMU",
-        )
-    )
-
-    # --------------------------------------------------------
-    # 4. Load and attach ECG interval values
-    # --------------------------------------------------------
-    tum_interval_df = load_interval_table(
-        interval_path=TUM_ECG_INTERVAL_PATH,
-        dataset_name="TUM",
-    )
-
-    lmu_interval_df = load_interval_table(
-        interval_path=LMU_ECG_INTERVAL_PATH,
-        dataset_name="LMU",
-    )
-
-    tum_cleaned = add_ecg_intervals(
-        dataset_df=tum_cleaned,
-        dataset_id_column=tum_id_column,
-        interval_df=tum_interval_df,
-        dataset_name="TUM",
-    )
-
-    lmu_cleaned = add_ecg_intervals(
-        dataset_df=lmu_cleaned,
-        dataset_id_column=lmu_id_column,
-        interval_df=lmu_interval_df,
-        dataset_name="LMU",
-    )
-
-    # --------------------------------------------------------
-    # 5. Save removed and cleaned datasets
-    # --------------------------------------------------------
-    removed_output_directory = (
-        SPLIT_OUTPUT_ROOT
-        / "removed_rows"
-    )
-
-    removed_output_directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    tum_removed.to_excel(
-        removed_output_directory
-        / "tum_removed_missing_images.xlsx",
-        index=False,
-    )
-
-    lmu_removed.to_excel(
-        removed_output_directory
-        / "lmu_removed_missing_images.xlsx",
-        index=False,
-    )
-
-    tum_cleaned.to_excel(
-        TUM_CLEANED_OUTPUT_PATH,
-        index=False,
-    )
-
-    lmu_cleaned.to_excel(
-        LMU_CLEANED_OUTPUT_PATH,
-        index=False,
-    )
-
-    # --------------------------------------------------------
-    # 6. Create and save merged dataset
-    # --------------------------------------------------------
-    entire_df = pd.concat(
-        [
-            tum_cleaned,
-            lmu_cleaned,
-        ],
-        axis=0,
-        ignore_index=True,
-        sort=False,
-    )
-
-    entire_df.to_excel(
-        ENTIRE_OUTPUT_PATH,
-        index=False,
-    )
-
-    # --------------------------------------------------------
-    # 7. Create ECG interval distribution plots
-    # --------------------------------------------------------
-    plot_domain_distribution(
-        tum_df=tum_cleaned,
-        lmu_df=lmu_cleaned,
-        column=PQ_COLUMN,
-        x_label="PQ interval (ms)",
-        output_path=PQ_DISTRIBUTION_PLOT_PATH,
-    )
-
-    plot_domain_distribution(
-        tum_df=tum_cleaned,
-        lmu_df=lmu_cleaned,
-        column=QRS_COLUMN,
-        x_label="QRS duration (ms)",
-        output_path=QRS_DISTRIBUTION_PLOT_PATH,
-    )
-
-    # --------------------------------------------------------
-    # 8. Print complete dataset statistics
-    # --------------------------------------------------------
-    print_dataset_statistics(
-        df=tum_cleaned,
-        dataset_name="TUM CLEANED DATASET",
-    )
-
-    print_dataset_statistics(
-        df=lmu_cleaned,
-        dataset_name="LMU CLEANED DATASET",
-    )
-
-    print_dataset_statistics(
-        df=entire_df,
-        dataset_name="MERGED CLEANED DATASET",
-    )
-
-    # --------------------------------------------------------
-    # 9. Create fixed domain-specific test sets and folds
-    # --------------------------------------------------------
-    tum_test, tum_folds = create_fixed_test_and_folds(
-        df=tum_cleaned,
-        dataset_name="TUM",
-        random_seed=RANDOM_SEED,
-    )
-
-    lmu_test, lmu_folds = create_fixed_test_and_folds(
-        df=lmu_cleaned,
-        dataset_name="LMU",
-        random_seed=RANDOM_SEED + 1,
-    )
-
-    # --------------------------------------------------------
-    # 10. Create merged splits as exact TUM + LMU combinations
-    # --------------------------------------------------------
-    merged_test, merged_folds = concatenate_matching_splits(
-        tum_test=tum_test,
-        tum_folds=tum_folds,
-        lmu_test=lmu_test,
-        lmu_folds=lmu_folds,
-    )
-
-    # --------------------------------------------------------
-    # 11. Verify merged identities
-    # --------------------------------------------------------
-    verify_merged_split(
-        tum_df=tum_test,
-        lmu_df=lmu_test,
-        merged_df=merged_test,
-        split_name="merged test",
-    )
-
-    for fold_index in range(
-        N_FOLDS
-    ):
-        verify_merged_split(
-            tum_df=tum_folds[
-                fold_index
-            ],
-            lmu_df=lmu_folds[
-                fold_index
-            ],
-            merged_df=merged_folds[
-                fold_index
-            ],
-            split_name=(
-                f"merged fold"
-                f"{fold_index + 1}"
+    site = make_numeric_site_audit(tum_df, lmu_df)
+
+    missingness_plot_dir = AUDIT_OUTPUT_ROOT / "missingness_plots"
+    top_missingness_tables: Dict[str, pd.DataFrame] = {}
+    for name, dataframe in datasets.items():
+        top_missingness_tables[name] = plot_top_missingness(
+            dataframe,
+            dataset_name=name,
+            output_path=(
+                missingness_plot_dir
+                / f"{name.lower()}_top{TOP_MISSINGNESS_COLUMNS}_missingness.png"
             ),
         )
 
-    # --------------------------------------------------------
-    # 12. Save split files
-    # --------------------------------------------------------
-    save_split_collection(
-        output_directory=(
-            SPLIT_OUTPUT_ROOT
-            / "tum"
-        ),
-        test_df=tum_test,
-        folds=tum_folds,
+    significance_root = AUDIT_OUTPUT_ROOT / "significance"
+    significance_tables: Dict[str, pd.DataFrame] = {}
+    for name, dataframe in datasets.items():
+        significance_tables[name] = run_feature_significance_analysis(
+            dataframe,
+            dataset_name=name,
+            output_directory=significance_root / name.lower(),
+        )
+
+    with pd.ExcelWriter(AUDIT_OUTPUT_ROOT / "dataset_audit.xlsx") as writer:
+        change_log.to_excel(writer, sheet_name="harmonization_log", index=False)
+        dropped_feature_missingness.to_excel(
+            writer,
+            sheet_name="dropped_feature_missingness",
+            index=False,
+        )
+        missingness_all.to_excel(writer, sheet_name="missingness_final", index=False)
+        site.to_excel(writer, sheet_name="site_shift", index=False)
+        for name, table in top_missingness_tables.items():
+            table.to_excel(
+                writer,
+                sheet_name=f"top_missing_{name.lower()}"[:31],
+                index=False,
+            )
+
+    schema = {
+        "columns": list(tum_df.columns),
+        "n_columns": len(tum_df.columns),
+        "dropped_features": DROP_FEATURE_COLUMNS,
+        "lvef_cap": LVEF_CAP if CAP_LVEF_AT_60 else None,
+        "ecc_decimals": ECC_INDEX_DECIMALS if ROUND_ECC_INDEX else None,
+        "calcium_totals_recalculated": RECALCULATE_CALCIUM_TOTALS,
+        "lmu_geometry_converted": CONVERT_LMU_GEOMETRY_TO_DERIVED_DIAMETERS,
+        "fixed_tests_require_equal_no_event_and_pacemaker_counts": True,
+        "significance_test": "two-sided Mann-Whitney U",
+        "multiple_testing_correction": "Benjamini-Hochberg FDR",
+        "significance_alpha_fdr": SIGNIFICANCE_ALPHA_FDR,
+    }
+    with open(
+        AUDIT_OUTPUT_ROOT / "schema_and_harmonization.json",
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(schema, f, indent=2)
+
+    return significance_tables
+
+
+# =============================================================================
+# FIXED TEST + FIVE DEVELOPMENT FOLDS
+# =============================================================================
+
+def make_stratification_key(df: pd.DataFrame) -> pd.Series:
+    labels = df[LABEL_COLUMN].map(normalize_binary_label).astype(str)
+    sex = df[SEX_COLUMN].astype(str).str.strip()
+    return labels + "__" + sex
+
+
+def validate_balanced_binary_labels(df: pd.DataFrame, dataset_name: str) -> None:
+    labels = df[LABEL_COLUMN].map(normalize_binary_label)
+    counts = labels.value_counts().to_dict()
+    no_event = int(counts.get(0, 0))
+    pacemaker = int(counts.get(1, 0))
+    if no_event != pacemaker:
+        raise AssertionError(
+            f"{dataset_name} is not label-balanced: "
+            f"No Event={no_event}, Pacemaker={pacemaker}."
+        )
+    if no_event == 0:
+        raise AssertionError(f"{dataset_name} contains no samples from either class.")
+    print(
+        f"{dataset_name}: balanced test verified — "
+        f"{no_event} No Event + {pacemaker} Pacemaker."
     )
 
-    save_split_collection(
-        output_directory=(
-            SPLIT_OUTPUT_ROOT
-            / "lmu"
-        ),
-        test_df=lmu_test,
-        folds=lmu_folds,
+
+def _allocate_test_counts_within_label(
+    stratum_sizes: Dict[str, int],
+    target_total: int,
+    n_folds: int,
+) -> Dict[str, int]:
+    """
+    Allocate an exact label-specific test total across SEX strata as close as
+    possible to the source sex distribution while leaving >= n_folds development
+    samples in every non-empty LABEL×SEX stratum.
+    """
+    if target_total < 0:
+        raise ValueError("target_total must be non-negative.")
+
+    capacities = {
+        key: max(0, size - n_folds)
+        for key, size in stratum_sizes.items()
+    }
+    if sum(capacities.values()) < target_total:
+        raise ValueError(
+            f"Cannot allocate {target_total} test samples while leaving "
+            f"{n_folds} development samples per stratum. "
+            f"Sizes={stratum_sizes}, capacities={capacities}"
+        )
+
+    label_total = sum(stratum_sizes.values())
+    desired = {
+        key: (target_total * size / label_total if label_total else 0.0)
+        for key, size in stratum_sizes.items()
+    }
+    allocated = {key: 0 for key in stratum_sizes}
+
+    # If feasible, ensure every SEX stratum with test capacity is represented.
+    eligible = [key for key, cap in capacities.items() if cap > 0]
+    if target_total >= len(eligible):
+        for key in eligible:
+            allocated[key] = 1
+
+    while sum(allocated.values()) < target_total:
+        candidates = [
+            key for key in stratum_sizes
+            if allocated[key] < capacities[key]
+        ]
+        if not candidates:
+            raise RuntimeError("Balanced test allocation exhausted all capacities.")
+
+        # Largest remaining quota first. Stable key tie-break keeps reproducibility.
+        key = max(
+            candidates,
+            key=lambda item: (desired[item] - allocated[item], str(item)),
+        )
+        allocated[key] += 1
+
+    return allocated
+
+
+def validate_partition_indices(
+    original_row_count: int,
+    test_indices: np.ndarray,
+    fold_indices: Sequence[np.ndarray],
+    dataset_name: str,
+) -> None:
+    all_indices = np.concatenate(
+        [np.asarray(test_indices), *[np.asarray(x) for x in fold_indices]]
+    )
+    if len(all_indices) != original_row_count:
+        raise AssertionError(f"{dataset_name}: partition row count mismatch.")
+    unique, counts = np.unique(all_indices, return_counts=True)
+    if len(unique) != original_row_count or np.any(counts != 1):
+        raise AssertionError(f"{dataset_name}: partition has overlap or missing rows.")
+    if not np.array_equal(np.sort(unique), np.arange(original_row_count)):
+        raise AssertionError(f"{dataset_name}: partition contains invalid row indices.")
+
+
+def create_fixed_test_and_folds(
+    df: pd.DataFrame,
+    dataset_name: str,
+    random_seed: int,
+) -> Tuple[pd.DataFrame, List[pd.DataFrame]]:
+    """
+    Create an EXACTLY label-balanced fixed test set, then five development folds.
+
+    Test-set rules:
+      - #No Event == #Pacemaker exactly.
+      - Size stays as close as feasible to TEST_FRACTION.
+      - Within each label, SEX proportions are preserved as closely as possible.
+      - At least N_FOLDS samples remain in every LABEL×SEX stratum so each
+        development fold receives at least one sample from every stratum.
+    """
+    work = df.copy().reset_index(drop=True)
+    work["_BINARY_LABEL"] = work[LABEL_COLUMN].map(normalize_binary_label)
+    work["_SEX_KEY"] = work[SEX_COLUMN].astype(str).str.strip()
+    rng = np.random.default_rng(random_seed)
+
+    label_counts = work["_BINARY_LABEL"].value_counts().to_dict()
+    if set(label_counts) != {0, 1}:
+        raise ValueError(
+            f"{dataset_name}: both binary labels are required. Counts={label_counts}"
+        )
+
+    stratum_sizes_by_label: Dict[int, Dict[str, int]] = {}
+    capacities_by_label: Dict[int, int] = {}
+    ideal_test_by_label: Dict[int, int] = {}
+
+    for label in [0, 1]:
+        label_df = work.loc[work["_BINARY_LABEL"] == label]
+        sizes = {
+            str(sex): int(count)
+            for sex, count in label_df["_SEX_KEY"].value_counts(sort=False).items()
+        }
+        stratum_sizes_by_label[label] = sizes
+        capacities_by_label[label] = sum(
+            max(0, size - N_FOLDS)
+            for size in sizes.values()
+        )
+        ideal_test_by_label[label] = int(
+            round(int(label_counts[label]) * TEST_FRACTION)
+        )
+
+    test_per_label = min(
+        ideal_test_by_label[0],
+        ideal_test_by_label[1],
+        capacities_by_label[0],
+        capacities_by_label[1],
+    )
+    if test_per_label < 1:
+        raise ValueError(
+            f"{dataset_name}: cannot create a non-empty balanced test set. "
+            f"Label counts={label_counts}, capacities={capacities_by_label}."
+        )
+
+    test_indices: List[int] = []
+    fold_indices: List[List[int]] = [[] for _ in range(N_FOLDS)]
+
+    for label in [0, 1]:
+        test_counts = _allocate_test_counts_within_label(
+            stratum_sizes_by_label[label],
+            target_total=test_per_label,
+            n_folds=N_FOLDS,
+        )
+
+        for sex_key in sorted(stratum_sizes_by_label[label]):
+            stratum = work.loc[
+                (work["_BINARY_LABEL"] == label)
+                & (work["_SEX_KEY"] == sex_key)
+            ]
+            indices = stratum.index.to_numpy(dtype=np.int64).copy()
+            rng.shuffle(indices)
+
+            test_count = test_counts[str(sex_key)]
+            test_part = indices[:test_count]
+            dev = indices[test_count:].copy()
+            rng.shuffle(dev)
+
+            if len(dev) < N_FOLDS:
+                raise AssertionError(
+                    f"{dataset_name}: LABEL={label}, SEX={sex_key} leaves only "
+                    f"{len(dev)} development samples for {N_FOLDS} folds."
+                )
+
+            parts = np.array_split(dev, N_FOLDS)
+            if any(len(part) == 0 for part in parts):
+                raise AssertionError(
+                    f"{dataset_name}: empty development fold in "
+                    f"LABEL={label}, SEX={sex_key}."
+                )
+
+            test_indices.extend(test_part.tolist())
+            for fold_i, part in enumerate(parts):
+                fold_indices[fold_i].extend(part.tolist())
+
+            print(
+                f"{dataset_name} LABEL={label}, SEX={sex_key}: "
+                f"total={len(indices)}, test={test_count}, "
+                f"folds={[len(part) for part in parts]}"
+            )
+
+    test_array = np.asarray(test_indices, dtype=np.int64)
+    fold_arrays = [np.asarray(x, dtype=np.int64) for x in fold_indices]
+    rng.shuffle(test_array)
+    for array in fold_arrays:
+        rng.shuffle(array)
+
+    validate_partition_indices(
+        len(work),
+        test_array,
+        fold_arrays,
+        dataset_name,
     )
 
-    save_split_collection(
-        output_directory=(
-            SPLIT_OUTPUT_ROOT
-            / "merged"
-        ),
-        test_df=merged_test,
-        folds=merged_folds,
+    drop_internal = ["_BINARY_LABEL", "_SEX_KEY"]
+    test_df = (
+        work.iloc[test_array]
+        .drop(columns=drop_internal)
+        .reset_index(drop=True)
     )
+    folds = [
+        work.iloc[array].drop(columns=drop_internal).reset_index(drop=True)
+        for array in fold_arrays
+    ]
 
-    # --------------------------------------------------------
-    # 12b. Create data-size experiment datasets
-    # --------------------------------------------------------
-    create_all_data_size_experiment_datasets(
-        tum_test=tum_test,
-        tum_folds=tum_folds,
-        lmu_test=lmu_test,
-        lmu_folds=lmu_folds,
+    validate_balanced_binary_labels(test_df, f"{dataset_name} test")
+    return test_df, folds
+
+
+def save_split_collection(
+    output_directory: Path,
+    test_df: pd.DataFrame,
+    folds: Sequence[pd.DataFrame],
+) -> None:
+    output_directory.mkdir(parents=True, exist_ok=True)
+    test_df.to_excel(output_directory / "test.xlsx", index=False)
+    for i, fold in enumerate(folds, start=1):
+        fold.to_excel(output_directory / f"fold{i}.xlsx", index=False)
+
+
+def concatenate_matching_splits(
+    tum_test: pd.DataFrame,
+    tum_folds: Sequence[pd.DataFrame],
+    lmu_test: pd.DataFrame,
+    lmu_folds: Sequence[pd.DataFrame],
+) -> Tuple[pd.DataFrame, List[pd.DataFrame]]:
+    merged_test = pd.concat([tum_test, lmu_test], ignore_index=True, sort=False)
+    merged_folds = [
+        pd.concat([tf, lf], ignore_index=True, sort=False)
+        for tf, lf in zip(tum_folds, lmu_folds)
+    ]
+    return merged_test, merged_folds
+
+
+def verify_merged_split(
+    tum_df: pd.DataFrame,
+    lmu_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+    split_name: str,
+) -> None:
+    expected = pd.concat([tum_df, lmu_df], ignore_index=True, sort=False)
+    if list(tum_df.columns) != list(lmu_df.columns) or list(merged_df.columns) != list(tum_df.columns):
+        raise AssertionError(f"{split_name}: column schema/order mismatch.")
+    pd.testing.assert_frame_equal(
+        merged_df.reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_dtype=False,
+        check_like=False,
     )
+    if len(merged_df) != len(tum_df) + len(lmu_df):
+        raise AssertionError(f"{split_name}: merged sample count is not TUM + LMU.")
+    print(f"{split_name}: verified exact TUM + LMU ({len(merged_df)} samples).")
 
-    # --------------------------------------------------------
-    # 13. Print detailed split distributions
-    # --------------------------------------------------------
-    print_split_summary(
-        dataset_name="TUM",
-        test_df=tum_test,
-        folds=tum_folds,
-    )
 
-    print_split_summary(
-        dataset_name="LMU",
-        test_df=lmu_test,
-        folds=lmu_folds,
-    )
+# =============================================================================
+# DATA-SIZE EXPERIMENTS
+# =============================================================================
 
-    print_split_summary(
-        dataset_name="MERGED",
-        test_df=merged_test,
-        folds=merged_folds,
-    )
+def calculate_balanced_subset_size(total_dev: int, percentage: int, n_folds: int) -> int:
+    requested = total_dev * percentage / 100.0
+    multiple = 2 * n_folds
+    lower = max((int(requested) // multiple) * multiple, multiple)
+    upper = max(lower + multiple, multiple)
+    return lower if abs(lower - requested) <= abs(upper - requested) else upper
 
-    # --------------------------------------------------------
-    # 14. Final concise summary
-    # --------------------------------------------------------
-    print()
-    print("=" * 80)
-    print("FINAL SUMMARY")
-    print("=" * 80)
+
+def sample_balanced_development_subset(
+    folds: Sequence[pd.DataFrame],
+    percentage: int,
+    random_seed: int,
+    dataset_name: str,
+) -> List[pd.DataFrame]:
+    dev = pd.concat(folds, ignore_index=True, sort=False).copy()
+    dev["_BINARY_LABEL"] = dev[LABEL_COLUMN].map(normalize_binary_label)
+
+    target_total = calculate_balanced_subset_size(len(dev), percentage, N_FOLDS)
+    n_per_label = target_total // 2
+    n_per_label_per_fold = n_per_label // N_FOLDS
+
+    class0 = dev.loc[dev["_BINARY_LABEL"] == 0].copy()
+    class1 = dev.loc[dev["_BINARY_LABEL"] == 1].copy()
+    available = min(len(class0), len(class1))
+    if n_per_label > available:
+        raise ValueError(
+            f"{dataset_name} {percentage}% needs {n_per_label}/class, only {available} available."
+        )
+
+    sampled0 = class0.sample(
+        n=n_per_label, replace=False, random_state=random_seed + percentage * 100 + 1
+    ).sample(frac=1, random_state=random_seed + percentage * 1000 + 10).reset_index(drop=True)
+    sampled1 = class1.sample(
+        n=n_per_label, replace=False, random_state=random_seed + percentage * 100 + 2
+    ).sample(frac=1, random_state=random_seed + percentage * 1000 + 20).reset_index(drop=True)
+
+    output: List[pd.DataFrame] = []
+    for fold_index in range(N_FOLDS):
+        start = fold_index * n_per_label_per_fold
+        end = start + n_per_label_per_fold
+        fold = pd.concat(
+            [sampled0.iloc[start:end], sampled1.iloc[start:end]],
+            ignore_index=True,
+        ).drop(columns="_BINARY_LABEL")
+        fold = fold.sample(
+            frac=1,
+            random_state=random_seed + percentage * 10000 + fold_index,
+        ).reset_index(drop=True)
+        output.append(fold)
+
+    # Strict balance/equal-size checks.
+    sizes = [len(x) for x in output]
+    if len(set(sizes)) != 1:
+        raise AssertionError(f"{dataset_name} {percentage}% folds not equal sized: {sizes}")
+    for i, fold in enumerate(output, start=1):
+        counts = fold[LABEL_COLUMN].map(normalize_binary_label).value_counts().to_dict()
+        if counts.get(0, 0) != counts.get(1, 0):
+            raise AssertionError(f"{dataset_name} {percentage}% fold{i} not label-balanced.")
 
     print(
-        f"TUM samples left:       "
-        f"{len(tum_cleaned)}"
+        f"{dataset_name} {percentage}%: selected {sum(sizes)}/{len(dev)} dev samples, "
+        f"fold sizes={sizes}"
+    )
+    return output
+
+
+def create_all_data_size_experiment_datasets(
+    tum_test: pd.DataFrame,
+    tum_folds: Sequence[pd.DataFrame],
+    lmu_test: pd.DataFrame,
+    lmu_folds: Sequence[pd.DataFrame],
+) -> None:
+    for percentage in DATA_SIZE_PERCENTAGES:
+        tum_pct = sample_balanced_development_subset(
+            tum_folds, percentage, RANDOM_SEED, "TUM"
+        )
+        lmu_pct = sample_balanced_development_subset(
+            lmu_folds, percentage, RANDOM_SEED + 1, "LMU"
+        )
+
+        merged_test = pd.concat([tum_test, lmu_test], ignore_index=True, sort=False)
+        merged_pct = [
+            pd.concat([tum_pct[i], lmu_pct[i]], ignore_index=True, sort=False)
+            for i in range(N_FOLDS)
+        ]
+
+        root = DATA_SIZE_OUTPUT_ROOT / f"{percentage}_percent"
+        save_split_collection(root / "tum", tum_test, tum_pct)
+        save_split_collection(root / "lmu", lmu_test, lmu_pct)
+        save_split_collection(root / "merged", merged_test, merged_pct)
+
+        validate_balanced_binary_labels(tum_test, f"{percentage}% TUM test")
+        validate_balanced_binary_labels(lmu_test, f"{percentage}% LMU test")
+        validate_balanced_binary_labels(merged_test, f"{percentage}% MERGED test")
+        verify_merged_split(tum_test, lmu_test, merged_test, f"{percentage}% merged test")
+        for i in range(N_FOLDS):
+            verify_merged_split(
+                tum_pct[i], lmu_pct[i], merged_pct[i],
+                f"{percentage}% merged fold{i + 1}",
+            )
+
+
+# =============================================================================
+# REPORTING
+# =============================================================================
+
+def print_dataset_summary(df: pd.DataFrame, name: str) -> None:
+    labels = df[LABEL_COLUMN].map(normalize_binary_label)
+    print("\n" + "=" * 72)
+    print(name)
+    print("=" * 72)
+    print(f"Samples: {len(df)}")
+    print(f"Columns: {len(df.columns)}")
+    print(f"No event: {int((labels == 0).sum())}")
+    print(f"Pacemaker: {int((labels == 1).sum())}")
+    print(f"QRS available: {int(df[QRS_COLUMN].notna().sum()) if QRS_COLUMN in df else 0}")
+    print(f"PQ available: {int(df[PQ_COLUMN].notna().sum()) if PQ_COLUMN in df else 0}")
+
+
+def write_construction_summary(
+    tum_df: pd.DataFrame,
+    lmu_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+    tum_test: pd.DataFrame,
+    lmu_test: pd.DataFrame,
+    merged_test: pd.DataFrame,
+    dropped_feature_missingness: pd.DataFrame,
+    significance_tables: Dict[str, pd.DataFrame],
+) -> None:
+    def _label_counts(dataframe: pd.DataFrame) -> Tuple[int, int]:
+        labels = dataframe[LABEL_COLUMN].map(normalize_binary_label)
+        return int((labels == 0).sum()), int((labels == 1).sum())
+
+    tum_test_no, tum_test_pacer = _label_counts(tum_test)
+    lmu_test_no, lmu_test_pacer = _label_counts(lmu_test)
+    merged_test_no, merged_test_pacer = _label_counts(merged_test)
+
+    lines = [
+        "FINAL DATASET CONSTRUCTION SUMMARY",
+        "=" * 72,
+        "",
+        "Harmonization:",
+        f"- Dropped from BOTH sites: {', '.join(DROP_FEATURE_COLUMNS)}",
+        "- Recalculated CT_ValvScTot, CT_AnnScTot, CT_LVOTScTot from components.",
+        "- Converted LMU CT_Peri_Deri = perimeter/pi.",
+        "- Converted LMU CT_Area_Deri = 2*sqrt(area/pi).",
+        f"- LVEF capped at {LVEF_CAP:g} in both sites: {CAP_LVEF_AT_60}.",
+        f"- ECC_INDEX rounded to {ECC_INDEX_DECIMALS} decimals in both sites: {ROUND_ECC_INDEX}.",
+        "- Same image-available cohort used for tabular, CT-only and combined models.",
+        "- TUM and LMU final columns/order are required to be identical.",
+        "- Every merged dataset is required to equal exact TUM + LMU concatenation.",
+        "",
+        "WHY DM / CABGPRE / NTPROBNPPRE WERE DROPPED:",
+        "- These percentages are measured in the ORIGINAL source tables before dropping.",
+    ]
+
+    lmu_drop = dropped_feature_missingness.loc[
+        dropped_feature_missingness["dataset"] == "LMU"
+    ]
+    for _, row in lmu_drop.iterrows():
+        lines.append(
+            f"- LMU {row['feature']}: missing in "
+            f"{row['no_event_missing_percent']:.1f}% of No Event and "
+            f"{row['pacemaker_missing_percent']:.1f}% of Pacemaker patients "
+            f"(overall {row['overall_missing_percent']:.1f}%)."
+        )
+
+    lines += [
+        "",
+        "DIAGNOSTIC LOGISTIC-REGRESSION SANITY CHECK (NOT A CLINICAL MODEL):",
+        "- scikit-learn LogisticRegression(max_iter=5000).",
+        "- Default L2 regularization, C=1.0, lbfgs solver.",
+        "- Shuffled StratifiedKFold(n_splits=5, random_state=42) with out-of-fold probabilities.",
+        "- It was used only to test whether values/missingness patterns could predict the label.",
+        "",
+        "Final cohorts:",
+        f"- TUM: {len(tum_df)}",
+        f"- LMU: {len(lmu_df)}",
+        f"- Merged: {len(merged_df)} = {len(tum_df)} + {len(lmu_df)}",
+        "",
+        "Fixed tests — EXACT label balance enforced:",
+        f"- TUM test: {len(tum_test)} = {tum_test_no} No Event + {tum_test_pacer} Pacemaker",
+        f"- LMU test: {len(lmu_test)} = {lmu_test_no} No Event + {lmu_test_pacer} Pacemaker",
+        f"- Merged test: {len(merged_test)} = {merged_test_no} No Event + {merged_test_pacer} Pacemaker",
+        "",
+        "Final missingness plots:",
+        f"- Top {TOP_MISSINGNESS_COLUMNS} missing features are plotted AFTER configured feature drops for TUM, LMU and Merged.",
+        "",
+        "No Event vs Pacemaker significance analysis:",
+        "- Two-sided Mann-Whitney U test for every numeric model feature.",
+        f"- Benjamini-Hochberg FDR correction at q <= {SIGNIFICANCE_ALPHA_FDR:.2f}.",
+    ]
+
+    for name in ["TUM", "LMU", "MERGED"]:
+        table = significance_tables[name]
+        n_valid = int(table["MWU_q"].notna().sum())
+        n_sig = int((table["MWU_q"] <= SIGNIFICANCE_ALPHA_FDR).sum())
+        lines.append(
+            f"- {name}: {n_sig}/{n_valid} tested features significant after FDR correction."
+        )
+
+    lines += [
+        "",
+        f"Final columns ({len(tum_df.columns)}):",
+        *[f"  {column}" for column in tum_df.columns],
+    ]
+
+    (AUDIT_OUTPUT_ROOT / "construction_summary.txt").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
     )
 
-    print(
-        f"LMU samples left:       "
-        f"{len(lmu_cleaned)}"
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main() -> None:
+    make_output_dirs()
+
+    if not TUM_EXCEL_PATH.exists() or not LMU_EXCEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Input files not found: TUM={TUM_EXCEL_PATH}, LMU={LMU_EXCEL_PATH}"
+        )
+
+    tum_raw = pd.read_excel(TUM_EXCEL_PATH)
+    lmu_raw = pd.read_excel(LMU_EXCEL_PATH)
+
+    validate_required_columns(tum_raw, "TUM raw")
+    validate_required_columns(lmu_raw, "LMU raw")
+
+    tum_id = find_id_column(tum_raw, ID_COLUMN)
+    lmu_id = find_id_column(lmu_raw, ID_COLUMN)
+    validate_unique_ids(tum_raw, tum_id, "TUM raw")
+    validate_unique_ids(lmu_raw, lmu_id, "LMU raw")
+    ensure_no_cross_site_id_overlap(tum_raw, lmu_raw, tum_id, lmu_id)
+
+    # Capture the missingness that motivated feature removal BEFORE those
+    # columns disappear from the harmonized model tables.
+    dropped_feature_missingness = pd.concat(
+        [
+            make_dropped_feature_missingness_report(tum_raw, "TUM"),
+            make_dropped_feature_missingness_report(lmu_raw, "LMU"),
+        ],
+        ignore_index=True,
     )
 
-    print(
-        f"Merged samples:         "
-        f"{len(entire_df)}"
+    # -------------------------------------------------------------------------
+    # Harmonize BEFORE splitting.
+    # -------------------------------------------------------------------------
+    tum_h, lmu_h, change_log = harmonize_base_datasets(tum_raw, lmu_raw)
+    tum_h, lmu_h = enforce_identical_schema(tum_h, lmu_h)
+
+    # -------------------------------------------------------------------------
+    # Keep only patients with images -> identical cohort across modalities.
+    # -------------------------------------------------------------------------
+    image_ids = collect_image_identifiers(IMAGE_ROOT)
+    tum_clean, tum_removed = clean_dataframe_using_images(tum_h, image_ids, tum_id, "TUM")
+    lmu_clean, lmu_removed = clean_dataframe_using_images(lmu_h, image_ids, lmu_id, "LMU")
+
+    removed_dir = SPLIT_OUTPUT_ROOT / "removed_rows"
+    removed_dir.mkdir(parents=True, exist_ok=True)
+    tum_removed.to_excel(removed_dir / "tum_removed_missing_images.xlsx", index=False)
+    lmu_removed.to_excel(removed_dir / "lmu_removed_missing_images.xlsx", index=False)
+
+    # -------------------------------------------------------------------------
+    # ECG intervals.
+    # -------------------------------------------------------------------------
+    tum_intervals = load_interval_table(TUM_ECG_INTERVAL_PATH, "TUM")
+    lmu_intervals = load_interval_table(LMU_ECG_INTERVAL_PATH, "LMU")
+    tum_clean = add_ecg_intervals(tum_clean, tum_id, tum_intervals, "TUM")
+    lmu_clean = add_ecg_intervals(lmu_clean, lmu_id, lmu_intervals, "LMU")
+
+    # Adding ECG columns may change column order; enforce one canonical order.
+    tum_clean, lmu_clean = enforce_identical_schema(tum_clean, lmu_clean)
+    validate_unique_ids(tum_clean, tum_id, "TUM cleaned")
+    validate_unique_ids(lmu_clean, lmu_id, "LMU cleaned")
+    ensure_no_cross_site_id_overlap(tum_clean, lmu_clean, tum_id, lmu_id)
+
+    # -------------------------------------------------------------------------
+    # Save final site datasets + exact merged dataset.
+    # -------------------------------------------------------------------------
+    merged = pd.concat([tum_clean, lmu_clean], ignore_index=True, sort=False)
+    if list(merged.columns) != list(tum_clean.columns):
+        raise AssertionError("Merged dataset column order changed unexpectedly.")
+    if len(merged) != len(tum_clean) + len(lmu_clean):
+        raise AssertionError("Merged sample count != TUM + LMU.")
+
+    tum_clean.to_excel(TUM_CLEANED_OUTPUT_PATH, index=False)
+    lmu_clean.to_excel(LMU_CLEANED_OUTPUT_PATH, index=False)
+    merged.to_excel(ENTIRE_OUTPUT_PATH, index=False)
+
+    # Audit FINAL model cohort, not just raw files. Missingness plots and
+    # significance plots are generated for TUM, LMU and exact merged data.
+    significance_tables = save_audits(
+        tum_clean,
+        lmu_clean,
+        merged,
+        change_log,
+        dropped_feature_missingness,
     )
 
-    print()
-    print(
-        f"TUM with QRSADM:        "
-        f"{int(tum_cleaned[QRS_COLUMN].notna().sum())}"
+    # -------------------------------------------------------------------------
+    # Fixed test + development folds.
+    # -------------------------------------------------------------------------
+    tum_test, tum_folds = create_fixed_test_and_folds(tum_clean, "TUM", RANDOM_SEED)
+    lmu_test, lmu_folds = create_fixed_test_and_folds(lmu_clean, "LMU", RANDOM_SEED + 1)
+    merged_test, merged_folds = concatenate_matching_splits(
+        tum_test, tum_folds, lmu_test, lmu_folds
     )
 
-    print(
-        f"TUM with PQADM:         "
-        f"{int(tum_cleaned[PQ_COLUMN].notna().sum())}"
+    validate_balanced_binary_labels(tum_test, "TUM test")
+    validate_balanced_binary_labels(lmu_test, "LMU test")
+    validate_balanced_binary_labels(merged_test, "MERGED test")
+
+    verify_merged_split(tum_test, lmu_test, merged_test, "merged test")
+    for i in range(N_FOLDS):
+        verify_merged_split(tum_folds[i], lmu_folds[i], merged_folds[i], f"merged fold{i+1}")
+
+    save_split_collection(SPLIT_OUTPUT_ROOT / "tum", tum_test, tum_folds)
+    save_split_collection(SPLIT_OUTPUT_ROOT / "lmu", lmu_test, lmu_folds)
+    save_split_collection(SPLIT_OUTPUT_ROOT / "merged", merged_test, merged_folds)
+
+    # -------------------------------------------------------------------------
+    # Data-size experiments, always using the SAME original fixed test sets.
+    # -------------------------------------------------------------------------
+    create_all_data_size_experiment_datasets(tum_test, tum_folds, lmu_test, lmu_folds)
+
+    write_construction_summary(
+        tum_clean,
+        lmu_clean,
+        merged,
+        tum_test,
+        lmu_test,
+        merged_test,
+        dropped_feature_missingness,
+        significance_tables,
     )
 
-    print(
-        f"LMU with QRSADM:        "
-        f"{int(lmu_cleaned[QRS_COLUMN].notna().sum())}"
-    )
+    print_dataset_summary(tum_clean, "FINAL TUM")
+    print_dataset_summary(lmu_clean, "FINAL LMU")
+    print_dataset_summary(merged, "FINAL MERGED")
 
-    print(
-        f"LMU with PQADM:         "
-        f"{int(lmu_cleaned[PQ_COLUMN].notna().sum())}"
-    )
-
-    print()
-    print(
-        f"TUM test samples:       "
-        f"{len(tum_test)}"
-    )
-
-    print(
-        f"LMU test samples:       "
-        f"{len(lmu_test)}"
-    )
-
-    print(
-        f"Merged test samples:    "
-        f"{len(merged_test)}"
-    )
-
-    print()
-    print(
-        f"Cleaned TUM saved to:   "
-        f"{TUM_CLEANED_OUTPUT_PATH}"
-    )
-
-    print(
-        f"Cleaned LMU saved to:   "
-        f"{LMU_CLEANED_OUTPUT_PATH}"
-    )
-
-    print(
-        f"Entire dataset saved:   "
-        f"{ENTIRE_OUTPUT_PATH}"
-    )
-
-    print(
-        f"Split folders saved:    "
-        f"{SPLIT_OUTPUT_ROOT}"
-    )
-
-    print(
-        f"PQ plot saved to:       "
-        f"{PQ_DISTRIBUTION_PLOT_PATH}"
-    )
-
-    print(
-        f"QRS plot saved to:      "
-        f"{QRS_DISTRIBUTION_PLOT_PATH}"
-    )
-
-    print()
-    print(
-        "Merged test and folds were verified as exact combinations:"
-    )
-
-    print(
-        "  merged/test.xlsx  = "
-        "tum/test.xlsx  + lmu/test.xlsx"
-    )
-
-    print(
-        "  merged/fold1.xlsx = "
-        "tum/fold1.xlsx + lmu/fold1.xlsx"
-    )
-
-    print("  ...")
-
-    print(
-        "  merged/fold5.xlsx = "
-        "tum/fold5.xlsx + lmu/fold5.xlsx"
-    )
+    print("\nConstruction completed successfully.")
+    print(f"Audit workbook: {AUDIT_OUTPUT_ROOT / 'dataset_audit.xlsx'}")
+    print(f"Summary: {AUDIT_OUTPUT_ROOT / 'construction_summary.txt'}")
 
 
 if __name__ == "__main__":

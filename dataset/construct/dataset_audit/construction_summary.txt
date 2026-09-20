@@ -1,0 +1,84 @@
+FINAL DATASET CONSTRUCTION SUMMARY
+========================================================================
+
+Harmonization:
+- Dropped from BOTH sites: DM, CABGPRE, NTPROBNPPRE
+- Recalculated CT_ValvScTot, CT_AnnScTot, CT_LVOTScTot from components.
+- Converted LMU CT_Peri_Deri = perimeter/pi.
+- Converted LMU CT_Area_Deri = 2*sqrt(area/pi).
+- LVEF capped at 60 in both sites: True.
+- ECC_INDEX rounded to 2 decimals in both sites: True.
+- Same image-available cohort used for tabular, CT-only and combined models.
+- TUM and LMU final columns/order are required to be identical.
+- Every merged dataset is required to equal exact TUM + LMU concatenation.
+
+WHY DM / CABGPRE / NTPROBNPPRE WERE DROPPED:
+- These percentages are measured in the ORIGINAL source tables before dropping.
+- LMU DM: missing in 100.0% of No Event and 25.6% of Pacemaker patients (overall 62.8%).
+- LMU CABGPRE: missing in 100.0% of No Event and 57.8% of Pacemaker patients (overall 78.9%).
+- LMU NTPROBNPPRE: missing in 100.0% of No Event and 99.8% of Pacemaker patients (overall 99.9%).
+
+DIAGNOSTIC LOGISTIC-REGRESSION SANITY CHECK (NOT A CLINICAL MODEL):
+- scikit-learn LogisticRegression(max_iter=5000).
+- Default L2 regularization, C=1.0, lbfgs solver.
+- Shuffled StratifiedKFold(n_splits=5, random_state=42) with out-of-fold probabilities.
+- It was used only to test whether values/missingness patterns could predict the label.
+
+Final cohorts:
+- TUM: 326
+- LMU: 841
+- Merged: 1167 = 326 + 841
+
+Fixed tests — EXACT label balance enforced:
+- TUM test: 66 = 33 No Event + 33 Pacemaker
+- LMU test: 168 = 84 No Event + 84 Pacemaker
+- Merged test: 234 = 117 No Event + 117 Pacemaker
+
+Final missingness plots:
+- Top 10 missing features are plotted AFTER configured feature drops for TUM, LMU and Merged.
+
+No Event vs Pacemaker significance analysis:
+- Two-sided Mann-Whitney U test for every numeric model feature.
+- Benjamini-Hochberg FDR correction at q <= 0.05.
+- TUM: 2/35 tested features significant after FDR correction.
+- LMU: 0/35 tested features significant after FDR correction.
+- MERGED: 3/35 tested features significant after FDR correction.
+
+Final columns (37):
+  ID
+  LABEL
+  AGE
+  BMI
+  AFPRE
+  LVEFPRE
+  PREDILATION
+  CT_ValScNCC
+  CT_ValScRCC
+  CT_ValScLCC
+  CT_ValvScTot
+  CT_AnnScNCC
+  CT_AnnScRCC
+  CT_AnnScLCC
+  CT_AnnScTot
+  CT_LVOTScNCC
+  CT_LVOTScRCC
+  CT_LVOTScLCC
+  CT_LVOTScTot
+  SEX
+  CT_AnnMean
+  ECC_INDEX
+  CT_Peri_Deri
+  CT_Area_Deri
+  nyha2
+  nyha3
+  nyha4
+  model1
+  model2
+  model3
+  model4
+  model7
+  model8
+  brand2
+  brand8
+  QRSADM
+  PQADM
