@@ -1,0 +1,31 @@
+{
+  "dataset_root": "/home/ubuntu/TAVI_final/dataset/construct/five_feature_dataset/dataset_splits_5_features",
+  "train_dataset": "pre",
+  "test_dataset": "lmu",
+  "pretrained": {
+    "checkpoint_dir": "/home/ubuntu/TAVI_final/Tabular/top5_tabpfn/results/merged_merged/100_percent",
+    "train_dataset": "merged"
+  },
+  "id_col": "ID",
+  "label_col": "LABEL",
+  "output_dir": "results/merged_lmu",
+  "n_folds": 5,
+  "random_seed": 42,
+  "device": "cuda",
+  "finetuning": {
+    "epochs": 300,
+    "learning_rate": 1e-05,
+    "batch_size": 16,
+    "meta_batch_size": 1,
+    "patience": 30
+  },
+  "episodes_per_epoch": 4,
+  "evaluation": {
+    "n_inference_context_samples": null
+  },
+  "feature_importa+nce": {
+    "enabled": true,
+    "n_repeats": 5,
+    "metadata_path": "/home/ubuntu/TAVI_new/dataset/new_features_table.xlsx"
+  }
+}

@@ -73,7 +73,7 @@ DATASET_ROOT = Path("/home/ubuntu/TAVI_final/dataset/construct/dataset_splits")
 #     "tum"
 #     "lmu"
 #     "merged"
-DATASET = "merged"
+DATASET = "lmu"  
 
 ID_COL = "ID"
 LABEL_COL = "LABEL"

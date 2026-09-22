@@ -1287,7 +1287,7 @@ if __name__ == "__main__":
             "lmu",
             "merged",
         ],
-        default="lmu",
+        default="merged",
         help=(
             "Dataset folder to use. The model is trained on "
             "fold1.xlsx through fold5.xlsx and tested on test.xlsx."
